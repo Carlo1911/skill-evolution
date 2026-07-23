@@ -1,0 +1,8 @@
+scripts/
+proposals/
+docs/
+reports/
+__pycache__/
+*.pyc
+.env
+.DS_Store
