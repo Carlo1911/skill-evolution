@@ -11,11 +11,13 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 from uuid import uuid4
+
+import evaluate
 
 
 class ProposalType(str, Enum):
@@ -251,35 +253,85 @@ def _parse_frontmatter(text: str) -> dict:
     return data
 
 
+def _evaluation_target(proposal: SkillEvolutionProposal) -> str:
+    """Return the history-store target key for a proposal (v1: skill-text)."""
+    return f"skill:{proposal.target_skill}" if proposal.target_skill else f"proposal:{proposal.proposal_id}"
+
+
+def _extract_evaluation_content(proposal: SkillEvolutionProposal) -> str:
+    """Extract the skill-text content to evaluate from a proposal (R5, R6).
+
+    Prefers a 'body' or 'description' proposed_changes new_value; falls back to
+    summary + rationale for proposal shapes without either (e.g. merge_skills).
+    """
+    for change in proposal.proposed_changes:
+        if change.field in ("body", "description") and change.new_value:
+            return change.new_value
+    return f"{proposal.summary}\n\n{proposal.rationale}"
+
+
 def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.85,
                    directory: Optional[str] = None) -> dict:
-    """Validate a proposal and return the action descriptor for skill_manage.
-    
+    """Validate a proposal, run the evaluation gate, and return the action descriptor for skill_manage.
+
     Args:
         proposal: The proposal to validate
         min_confidence: Minimum confidence threshold for auto-apply
         directory: Override proposals directory
-    
+
     Returns:
         dict with:
             can_apply: bool
             action: str (skill_manage action type)
             target_skill: str
             instructions: list of dicts for the agent
+            evaluation_results: list of evaluator result dicts (present once the gate has run)
     """
     if proposal.status != ProposalStatus.PROPOSED:
         raise ValueError(f"Cannot apply: proposal status is {proposal.status.value}, not 'proposed'")
-    
+
     if proposal.confidence < min_confidence:
         raise ValueError(f"Confidence {proposal.confidence:.2f} below threshold {min_confidence:.2f}")
-    
+
+    # Evaluation gate (R4, R21): run after status/confidence, before mutating the proposal.
+    target = _evaluation_target(proposal)
+    content = _extract_evaluation_content(proposal)
+    eval_results = evaluate.run_evaluators(content, target)
+
+    strictness = evaluate.resolve_gate_strictness(proposal.type.value)
+    gate_passed = evaluate.combine_gate(eval_results, strictness)
+
+    combined_score = (
+        sum(r.score for r in eval_results) / len(eval_results) if eval_results else 1.0
+    )
+    combined_feedback = (
+        "; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in eval_results)
+        or "no evaluators configured"
+    )
+    combined_result = evaluate.EvalResult(
+        score=combined_score, passed=gate_passed, evaluator_name="gate", feedback=combined_feedback,
+    )
+    evaluate.append_history(target, combined_result, session_ids=proposal.session_ids)
+
+    evaluation_results = [asdict(r) for r in eval_results]
+
+    if not gate_passed:
+        return {
+            "can_apply": False,
+            "action": proposal.type.value,
+            "target_skill": proposal.target_skill or "",
+            "instructions": [],
+            "evaluation_results": evaluation_results,
+        }
+
     result = {
         "can_apply": True,
         "action": proposal.type.value,
         "target_skill": proposal.target_skill or "",
         "instructions": [],
+        "evaluation_results": evaluation_results,
     }
-    
+
     if proposal.type == ProposalType.IMPROVE_EXISTING:
         for change in proposal.proposed_changes:
             instruction = {

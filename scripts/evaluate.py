@@ -520,6 +520,69 @@ class RegressionEvaluator(Evaluator):
 register_evaluator("regression", RegressionEvaluator)
 
 
+# ── Gate combination entry point (used by proposal.py's apply_proposal()) ─
+
+GATE_STRICTNESS_ENV_VAR = "SKILL_EVOLUTION_GATE_STRICTNESS"
+DEFAULT_GATE_STRICTNESS = "strict"
+
+
+def _run_one(evaluator: Evaluator, content: str, context: Dict[str, Any]) -> EvalResult:
+    """Run a single evaluator, treating any raised exception as a failed result (R21)."""
+    try:
+        return evaluator.evaluate(content, context)
+    except Exception as e:
+        return EvalResult(
+            score=0.0, passed=False, evaluator_name=getattr(evaluator, "name", "unknown"),
+            feedback=f"evaluator raised and was treated as failed (fail-closed, R21): {e}",
+        )
+
+
+def run_evaluators(content: str, target: str, context: Optional[Dict[str, Any]] = None) -> List[EvalResult]:
+    """Run every enabled evaluator (U1) against `content` for `target`.
+
+    The regression evaluator (if enabled) is run last, comparing against the
+    mean score of the other configured evaluators for this pass — never
+    silently skipped when a call raises (R21).
+    """
+    base_context = dict(context or {})
+    base_context.setdefault("target", target)
+
+    evaluators = get_enabled_evaluators()
+    non_regression = [e for e in evaluators if e.name != "regression"]
+    regression_evaluators = [e for e in evaluators if e.name == "regression"]
+
+    results: List[EvalResult] = [_run_one(e, content, base_context) for e in non_regression]
+
+    if regression_evaluators:
+        aggregate_score = sum(r.score for r in results) / len(results) if results else 0.0
+        regression_context = dict(base_context)
+        regression_context["new_score"] = aggregate_score
+        results.extend(_run_one(e, content, regression_context) for e in regression_evaluators)
+
+    return results
+
+
+def resolve_gate_strictness(proposal_type: str) -> str:
+    """Resolve gate strictness for `proposal_type` (KD4): per-type override > global default."""
+    override_var = f"{GATE_STRICTNESS_ENV_VAR}_{proposal_type.upper()}"
+    override = os.environ.get(override_var)
+    if override and override.strip():
+        return override.strip().lower()
+    return os.environ.get(GATE_STRICTNESS_ENV_VAR, DEFAULT_GATE_STRICTNESS).strip().lower()
+
+
+def combine_gate(results: List[EvalResult], strictness: str) -> bool:
+    """Combine evaluator results per `strictness`. No configured evaluators never blocks (today's behavior)."""
+    if not results:
+        return True
+    if strictness == "strict":
+        return all(r.passed for r in results)
+    if strictness == "majority":
+        passed_count = sum(1 for r in results if r.passed)
+        return passed_count > len(results) / 2
+    raise ValueError(f"Unknown gate strictness '{strictness}'. Available: strict, majority")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Skill evolution evaluation tools")
