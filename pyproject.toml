@@ -18,6 +18,9 @@ dev = [
 dspy = [
     "dspy>=3.0.0",
 ]
+optimizer = [
+    "dspy>=3.0.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["scripts*"]
