@@ -135,8 +135,9 @@ def save_proposal(proposal: SkillEvolutionProposal, directory: Optional[str] = N
     proposals_dir = directory or get_proposals_dir()
     os.makedirs(proposals_dir, exist_ok=True)
     path = os.path.join(proposals_dir, f"{proposal.proposal_id}.md")
+    content = evaluate.redact_secrets(proposal.render())  # R19: redact before persisting to disk
     with open(path, "w") as f:
-        f.write(proposal.render())
+        f.write(content)
     return path
 
 
