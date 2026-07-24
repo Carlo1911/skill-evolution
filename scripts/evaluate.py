@@ -11,11 +11,16 @@ Usage:
 
 import json
 import os
+import re
 import sys
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Type
+
+from fetch_sessions import SECRET_PATTERNS
 
 
 # ── Core result shape ───────────────────────────────────────────────
@@ -206,6 +211,111 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None) -
     with open(history_path, "w") as f:
         for entry in ordered_kept:
             f.write(json.dumps(entry) + "\n")
+
+
+# ── Provider adapter layer (KTD3: stdlib-only HTTP, KD5/KD6 naming) ──
+
+PROVIDER_ENV_VAR = "SKILL_EVOLUTION_PROVIDER"
+DEFAULT_PROVIDER = "claude"
+REDACTED_PLACEHOLDER = "[REDACTED]"
+
+
+class ProviderError(RuntimeError):
+    """Raised when a provider call fails: unknown provider, network error, non-2xx, or malformed response."""
+
+
+def redact_secrets(text: str) -> str:
+    """Redact any SECRET_PATTERNS match in `text` before it leaves the machine (R18/R19)."""
+    redacted = text
+    for pattern in SECRET_PATTERNS:
+        redacted = re.sub(re.escape(pattern), REDACTED_PLACEHOLDER, redacted, flags=re.IGNORECASE)
+    return redacted
+
+
+def resolve_provider(provider: Optional[str] = None, evaluator_name: Optional[str] = None) -> str:
+    """Resolve the active provider: explicit arg > per-evaluator override > global default (KD5)."""
+    if provider:
+        return provider
+    if evaluator_name:
+        override_var = f"SKILL_EVOLUTION_{evaluator_name.upper()}_PROVIDER"
+        override = os.environ.get(override_var)
+        if override:
+            return override
+    return os.environ.get(PROVIDER_ENV_VAR, DEFAULT_PROVIDER)
+
+
+def _call_claude(prompt: str, timeout: int = 60) -> str:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    model = os.environ.get("SKILL_EVOLUTION_CLAUDE_MODEL", "claude-sonnet-5")
+    body = json.dumps({
+        "model": model,
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise ProviderError(f"Claude provider call failed: {e}") from e
+    try:
+        return payload["content"][0]["text"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ProviderError(f"Unexpected Claude response shape: {payload}") from e
+
+
+def _call_ollama(prompt: str, timeout: int = 60) -> str:
+    base_url = os.environ.get("SKILL_EVOLUTION_OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    model = os.environ.get("SKILL_EVOLUTION_OLLAMA_MODEL", "llama3")
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/chat/completions",
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise ProviderError(f"Ollama/llama.cpp provider call failed: {e}") from e
+    try:
+        return payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ProviderError(f"Unexpected Ollama/llama.cpp response shape: {payload}") from e
+
+
+PROVIDER_CALLERS = {
+    "claude": _call_claude,
+    "ollama": _call_ollama,
+}
+
+
+def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: Optional[str] = None,
+                   timeout: int = 60) -> str:
+    """Redact secrets from `prompt`, resolve the active provider (KD5), and call it.
+
+    Raises ProviderError for an unknown provider or any call failure (fail-closed, R21).
+    """
+    resolved = resolve_provider(provider, evaluator_name)
+    if resolved not in PROVIDER_CALLERS:
+        raise ProviderError(
+            f"Unknown provider '{resolved}'. Available: {', '.join(sorted(PROVIDER_CALLERS))}"
+        )
+    safe_prompt = redact_secrets(prompt)
+    return PROVIDER_CALLERS[resolved](safe_prompt, timeout=timeout)
 
 
 def main():

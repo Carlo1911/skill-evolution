@@ -1,0 +1,102 @@
+"""Tests for scripts/evaluate.py's provider adapter layer (U3)."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+import pytest
+
+import evaluate
+from evaluate import ProviderError, call_provider, redact_secrets, resolve_provider
+
+
+@pytest.fixture(autouse=True)
+def clean_provider_env(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("SKILL_EVOLUTION_") and key.endswith("_PROVIDER"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("SKILL_EVOLUTION_PROVIDER", raising=False)
+
+
+def test_global_provider_used_when_no_override(monkeypatch):
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "ollama")
+    assert resolve_provider(evaluator_name="llm_judge") == "ollama"
+
+
+def test_default_provider_is_claude_when_nothing_set():
+    assert resolve_provider() == "claude"
+
+
+def test_per_evaluator_override_takes_precedence(monkeypatch):
+    """Covers AE2: llm_judge overridden to a different provider than the global default."""
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude")
+    monkeypatch.setenv("SKILL_EVOLUTION_LLM_JUDGE_PROVIDER", "ollama")
+
+    assert resolve_provider(evaluator_name="llm_judge") == "ollama"
+    assert resolve_provider(evaluator_name="regression") == "claude"
+
+
+def test_explicit_provider_arg_wins_over_everything(monkeypatch):
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude")
+    monkeypatch.setenv("SKILL_EVOLUTION_LLM_JUDGE_PROVIDER", "ollama")
+    assert resolve_provider(provider="ollama", evaluator_name="llm_judge") == "ollama"
+
+
+def test_redact_secrets_replaces_known_patterns():
+    text = "here is a key sk-ant-api-abc123 please use it"
+    redacted = redact_secrets(text)
+    assert "sk-ant-api" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redaction_runs_before_request_construction(monkeypatch):
+    captured = {}
+
+    def fake_caller(prompt, timeout=60):
+        captured["prompt"] = prompt
+        return "ok"
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "claude", fake_caller)
+
+    secret_prompt = "evaluate this: sk-ant-api-shouldnotleak"
+    call_provider(secret_prompt, provider="claude")
+
+    assert "sk-ant-api-shouldnotleak" not in captured["prompt"]
+    assert "[REDACTED]" in captured["prompt"]
+
+
+def test_provider_selection_resolves_per_evaluator_through_call_provider(monkeypatch):
+    calls = []
+
+    def claude_caller(prompt, timeout=60):
+        calls.append("claude")
+        return "claude-response"
+
+    def ollama_caller(prompt, timeout=60):
+        calls.append("ollama")
+        return "ollama-response"
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "claude", claude_caller)
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "ollama", ollama_caller)
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude")
+    monkeypatch.setenv("SKILL_EVOLUTION_LLM_JUDGE_PROVIDER", "ollama")
+
+    result = call_provider("hi", evaluator_name="llm_judge")
+    assert result == "ollama-response"
+    assert calls == ["ollama"]
+
+
+def test_unknown_provider_raises_clear_error():
+    with pytest.raises(ProviderError, match="Unknown provider 'bogus'"):
+        call_provider("hi", provider="bogus")
+
+
+def test_provider_call_failure_raises_provider_error(monkeypatch):
+    def failing_caller(prompt, timeout=60):
+        raise ProviderError("simulated timeout")
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "claude", failing_caller)
+
+    with pytest.raises(ProviderError, match="simulated timeout"):
+        call_provider("hi", provider="claude")
