@@ -89,15 +89,26 @@ def test_growth_just_over_20_percent_fails_with_growth_feedback():
 
 def test_missing_frontmatter_fails_with_specific_feedback():
     evaluator = DeterministicEvaluator()
-    result = evaluator.evaluate("# Just a heading\n\nNo frontmatter here.")
+    result = evaluator.evaluate("# Just a heading\n\nNo frontmatter here.", context={"content_kind": "body"})
     assert result.passed is False
     assert "frontmatter" in result.feedback.lower()
+
+
+def test_non_body_content_skips_frontmatter_check():
+    """A description-only change or summary+rationale fallback is plain prose,
+    never a full skill-file body -- the frontmatter check must not apply to it."""
+    evaluator = DeterministicEvaluator()
+    result = evaluator.evaluate("Just a plain description string with no frontmatter at all.", context={"content_kind": "description"})
+    assert result.passed is True
+
+    result = evaluator.evaluate("Some summary\n\nSome rationale", context={"content_kind": "summary_rationale"})
+    assert result.passed is True
 
 
 def test_missing_description_field_fails_naming_the_field():
     evaluator = DeterministicEvaluator()
     content = "---\nname: my-skill\n---\n\nBody\n"
-    result = evaluator.evaluate(content)
+    result = evaluator.evaluate(content, context={"content_kind": "body"})
     assert result.passed is False
     assert "description" in result.feedback.lower()
 
@@ -105,6 +116,6 @@ def test_missing_description_field_fails_naming_the_field():
 def test_missing_name_field_fails_naming_the_field():
     evaluator = DeterministicEvaluator()
     content = "---\ndescription: does a thing\n---\n\nBody\n"
-    result = evaluator.evaluate(content)
+    result = evaluator.evaluate(content, context={"content_kind": "body"})
     assert result.passed is False
     assert "name" in result.feedback.lower()

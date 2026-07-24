@@ -88,9 +88,14 @@ Then markdown body with rationale and evidence.
 
 1. **Read-only first.** Inspect skills with `skill_manage(action='list')` before proposing changes.
 
-2. **Auto-apply when enabled.** If `SKILL_EVOLUTION_AUTO_APPLY=true`, proposals with
-   confidence >= `SKILL_EVOLUTION_MIN_CONFIDENCE` (default 0.85) should be auto-applied
-   via `skill_manage` after creating the proposal file.
+2. **Do not self-apply.** Never call `skill_manage` to patch, create, merge, or delete a
+   skill based on your own confidence score, even when `SKILL_EVOLUTION_AUTO_APPLY=true`.
+   Your job in this session is to write an honest, well-evidenced proposal file and stop.
+   Auto-apply (when enabled) is decided by a separate step, run after this session ends,
+   that calls `apply_proposal()` -- which re-scores the proposal through the configured
+   evaluators (deterministic/LLM-judge/regression) and only invokes `skill_manage` when
+   that independent gate passes. A proposal's `confidence` field is your input to that
+   gate, not authorization to bypass it.
 
 3. **Quality over quantity.** A single well-evidenced proposal > five speculative ones.
    Only generate proposals with confidence >= 0.5.

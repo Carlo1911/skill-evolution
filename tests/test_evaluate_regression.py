@@ -66,3 +66,20 @@ def test_missing_context_fails_closed(history_file):
     evaluator = RegressionEvaluator()
     result = evaluator.evaluate("content", context={})
     assert result.passed is False
+
+
+def test_failed_entry_never_lowers_the_baseline(history_file):
+    """A rejected attempt must not become the bar a later mediocre attempt clears."""
+    append_history("skill:foo", EvalResult(score=0.2, feedback="bad", passed=False, evaluator_name="gate"))
+    evaluator = RegressionEvaluator()
+    result = evaluator.evaluate("content", context={"target": "skill:foo", "new_score": 0.4})
+    assert result.passed is True
+    assert "no baseline" in result.feedback.lower()
+
+
+def test_baselines_off_the_last_passed_entry_even_with_a_failure_in_between(history_file):
+    _seed("skill:foo", 0.7)
+    append_history("skill:foo", EvalResult(score=0.1, feedback="bad", passed=False, evaluator_name="gate"))
+    evaluator = RegressionEvaluator()
+    result = evaluator.evaluate("content", context={"target": "skill:foo", "new_score": 0.5})
+    assert result.passed is False  # 0.5 regresses against the last PASSED score of 0.7, not the failed 0.1

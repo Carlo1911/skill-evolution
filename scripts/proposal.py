@@ -278,8 +278,21 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
         raise ValueError(f"Confidence {proposal.confidence:.2f} below threshold {min_confidence:.2f}")
 
     # Evaluation gate: run after status/confidence, before mutating the proposal.
-    eval_results, _, gate_passed = evaluate.evaluate_and_record(proposal)
-    evaluation_results = [asdict(r) for r in eval_results]
+    # Fail closed (R21) on any error here too -- not just inside individual
+    # evaluators -- so a misconfigured SKILL_EVOLUTION_EVALUATORS/GATE_STRICTNESS
+    # value blocks auto-apply instead of crashing apply_proposal() uncaught.
+    try:
+        eval_results, _, gate_passed = evaluate.evaluate_and_record(proposal)
+        evaluation_results = [asdict(r) for r in eval_results]
+    except Exception as e:
+        return {
+            "can_apply": False,
+            "action": proposal.type.value,
+            "target_skill": proposal.target_skill or "",
+            "instructions": [],
+            "evaluation_results": [],
+            "evaluation_error": f"evaluation gate raised and was treated as failed (fail-closed): {e}",
+        }
 
     if not gate_passed:
         return {

@@ -146,3 +146,20 @@ def test_combined_result_appended_to_history_exactly_once_on_fail(monkeypatch, i
     assert len(entries) == 1
     assert entries[0]["evaluator_name"] == "gate"
     assert entries[0]["passed"] is False
+
+
+def test_gate_level_error_blocks_apply_instead_of_crashing(monkeypatch, isolated_history):
+    """A misconfigured env value (bad evaluator name, bad gate strictness) raises
+    one level above any individual evaluator -- apply_proposal() must still fail
+    closed (can_apply: False) rather than let the exception propagate uncaught."""
+    def raising_evaluate_and_record(proposal, session_ids=None):
+        raise ValueError("simulated misconfiguration: unknown evaluator")
+
+    monkeypatch.setattr(evaluate, "evaluate_and_record", raising_evaluate_and_record)
+
+    proposal = _make_proposal()
+    result = apply_proposal(proposal, min_confidence=0.5)
+
+    assert result["can_apply"] is False
+    assert proposal.status == ProposalStatus.PROPOSED
+    assert "evaluation_error" in result

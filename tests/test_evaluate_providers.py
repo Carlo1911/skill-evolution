@@ -50,6 +50,27 @@ def test_redact_secrets_replaces_known_patterns():
     assert "[REDACTED]" in redacted
 
 
+def test_redact_secrets_removes_the_full_secret_value_not_just_the_marker():
+    """A marker-only substring replace leaves the rest of the real key intact."""
+    secret_suffix = "abcdefghijklmnopqrstuvwxyz0123456789"
+    redacted = redact_secrets(f"here is a key sk-ant-api-{secret_suffix} please use it")
+    assert secret_suffix not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_handles_key_value_shaped_secrets():
+    redacted = redact_secrets("ANTHROPIC_API_KEY=sk-ant-api03-realvaluehere123")
+    assert "sk-ant-api03-realvaluehere123" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_preserves_unrelated_lines():
+    redacted = redact_secrets("normal line one\nsecret sk-ant-api-XXXX here\nnormal line two")
+    assert "normal line one" in redacted
+    assert "normal line two" in redacted
+    assert "XXXX" not in redacted
+
+
 def test_redaction_runs_before_request_construction(monkeypatch):
     captured = {}
 

@@ -10,7 +10,7 @@ import pytest
 import evaluate
 import proposal as proposal_module
 from evaluate import EvalResult, retroactive_reevaluate
-from proposal import ProposalType, ProposedChange, SkillEvolutionProposal, save_proposal
+from proposal import ProposalStatus, ProposalType, ProposedChange, SkillEvolutionProposal, save_proposal
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ def stub_evaluator(monkeypatch):
     )
 
 
-def _seed_proposal(proposals_dir, target_skill, proposal_id):
+def _seed_proposal(proposals_dir, target_skill, proposal_id, status=ProposalStatus.PROPOSED):
     proposal = SkillEvolutionProposal(
         proposal_id=proposal_id,
         type=ProposalType.IMPROVE_EXISTING,
@@ -40,6 +40,7 @@ def _seed_proposal(proposals_dir, target_skill, proposal_id):
         confidence=0.9,
         summary=f"Improve {target_skill}",
         rationale="Fixture rationale.",
+        status=status,
         proposed_changes=[ProposedChange(field="body", new_value="Body content.")],
     )
     save_proposal(proposal, directory=proposals_dir)
@@ -88,3 +89,39 @@ def test_running_retroactive_twice_produces_two_distinct_entries(isolated_dirs):
 
     entries = evaluate.read_history(target)
     assert len(entries) == 2
+
+
+def test_rejected_and_applied_proposals_are_excluded_by_default(isolated_dirs):
+    """A rejected/applied proposal is not a live decision and must not inject a
+    score into the same history stream the live apply_proposal() gate regresses against."""
+    _seed_proposal(isolated_dirs["proposals_dir"], "proposed-skill", "p1", status=ProposalStatus.PROPOSED)
+    _seed_proposal(isolated_dirs["proposals_dir"], "rejected-skill", "p2", status=ProposalStatus.REJECTED)
+    _seed_proposal(isolated_dirs["proposals_dir"], "applied-skill", "p3", status=ProposalStatus.APPLIED)
+
+    summaries = retroactive_reevaluate(proposals_dir=isolated_dirs["proposals_dir"])
+
+    assert {s["target"] for s in summaries} == {"skill:proposed-skill"}
+
+
+def test_include_all_statuses_opts_back_in(isolated_dirs):
+    _seed_proposal(isolated_dirs["proposals_dir"], "proposed-skill", "p1", status=ProposalStatus.PROPOSED)
+    _seed_proposal(isolated_dirs["proposals_dir"], "rejected-skill", "p2", status=ProposalStatus.REJECTED)
+
+    proposals = evaluate._select_retroactive_proposals(
+        proposals_dir=isolated_dirs["proposals_dir"], include_all_statuses=True,
+    )
+
+    assert {p.proposal_id for p in proposals} == {"p1", "p2"}
+
+
+def test_since_with_timezone_naive_date_does_not_crash(isolated_dirs):
+    proposal = _seed_proposal(isolated_dirs["proposals_dir"], "test-skill", "p1")
+    proposals = evaluate._select_retroactive_proposals(
+        since="2020-01-01", proposals_dir=isolated_dirs["proposals_dir"],
+    )
+    assert proposal.proposal_id in [p.proposal_id for p in proposals]
+
+
+def test_since_with_malformed_date_raises_clear_value_error(isolated_dirs):
+    with pytest.raises(ValueError, match="invalid --since date"):
+        evaluate._select_retroactive_proposals(since="not-a-date", proposals_dir=isolated_dirs["proposals_dir"])
