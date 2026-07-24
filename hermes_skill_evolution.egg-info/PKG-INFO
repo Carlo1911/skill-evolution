@@ -1,0 +1,107 @@
+Metadata-Version: 2.4
+Name: hermes-skill-evolution
+Version: 1.0.0
+Summary: Autonomous skill improvement for Hermes Agent
+License: MIT
+Keywords: hermes,agent,skills,evolution,self-improvement
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Provides-Extra: dspy
+Requires-Dist: dspy>=3.0.0; extra == "dspy"
+Provides-Extra: optimizer
+Requires-Dist: dspy>=3.0.0; extra == "optimizer"
+Dynamic: license-file
+
+# Hermes Skill Evolution
+
+Autonomous self-improvement for your Hermes Agent skills.
+
+Reads past sessions, analyzes them against loaded skills, generates structured proposals, and optionally auto-applies high-confidence improvements.
+
+**No daemons. No external services. No GPU.** Just Hermes, a cron job, and Python stdlib.
+
+## Quick Start
+
+```bash
+# Install the skill
+hermes skills install https://raw.githubusercontent.com/<your-user>/hermes-skill-evolution/main/SKILL.md
+
+# Load it
+hermes -s hermes-skill-evolution
+
+# Run analysis
+"Run skill evolution analysis on my recent sessions"
+```
+
+The agent will:
+1. Fetch unprocessed sessions from `~/.hermes/state.db`
+2. Scan your installed skills
+3. Analyze each session for coverage gaps
+4. Generate proposal files in `proposals/`
+5. Deliver a summary
+
+## Auto-Apply (Opt-In)
+
+By default, proposals are review-only. Enable auto-apply:
+
+```bash
+export SKILL_EVOLUTION_AUTO_APPLY=true
+export SKILL_EVOLUTION_MIN_CONFIDENCE=0.85
+```
+
+## Scheduled Runs
+
+```bash
+# Via in-session request:
+"Create a daily cron job for skill evolution at 2 AM"
+
+# Or manually:
+hermes cron create "0 2 * * *" \
+  --name skill-evolution-analysis \
+  --skill hermes-skill-evolution \
+  --deliver all
+```
+
+## Project Structure
+
+```
+hermes-skill-evolution/
+├── SKILL.md                    # Skill file (installable via hermes skills install)
+├── README.md                   # This file
+├── LICENSE                     # MIT
+├── scripts/                    # Standalone Python tools
+│   ├── fetch_sessions.py       # Read Hermes state.db → NDJSON
+│   ├── skill_index.py          # Scan skills → JSON index
+│   ├── analyze.py              # Format sessions for LLM
+│   ├── proposal.py             # Proposal schema, I/O, apply logic
+│   ├── state.py                # Track processed sessions
+│   └── skill-evolution-fetch.sh # Cron wrapper
+├── proposals/                  # Generated proposal files
+├── docs/                       # Documentation
+└── reports/                    # Quality reports
+```
+
+## How It Works
+
+```mermaid
+flowchart LR
+    A[fetch_sessions.py] -->|NDJSON| B[cron agent]
+    C[skill_index.py] -->|skill index| B
+    B -->|analysis| D[Proposal .md files]
+    D -->|review| E{Human approves?}
+    E -->|Yes| F[skill_manage applies]
+    E -->|No| G[Archive]
+```
+
+## Dependencies
+
+- Python 3.10+
+- Hermes Agent (any version)
+- No pip packages required
+
+## License
+
+MIT

@@ -126,13 +126,17 @@ hermes cron create "0 2 * * *" \
 
 ## Constraints & Guardrails
 
-Every auto-applied change must pass:
+Every auto-applied change must pass an evaluation gate (`scripts/evaluate.py`) before `apply_proposal()` calls `skill_manage`:
 
-- **Size limit**: Skills ≤ 15KB
-- **Growth limit**: No more than 20% larger than baseline
+- **Size limit**: Skills ≤ 15KB (`SKILL_EVOLUTION_MAX_SKILL_SIZE_KB`)
+- **Growth limit**: No more than 20% larger than baseline (`SKILL_EVOLUTION_MAX_GROWTH_PCT`)
 - **Structure**: Valid YAML frontmatter with `name:` and `description:`
 - **Non-empty**: Evolved artifact must not be empty
+- **Rubric score**: An LLM judge scores correctness, procedure-following, and conciseness against a configurable threshold (`SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD`, default 0.7)
+- **No regression**: The new score must not fall below the target's last passing score in its evaluation history
 - **No hub skill mutation**: Only modifies `created_by: agent` skills (Hermes curator convention)
+
+By default every configured evaluator must pass (`SKILL_EVOLUTION_GATE_STRICTNESS=strict`); set it to `majority` to require only more than half. Any evaluator or provider failure is treated as a failing result — the gate fails closed, never open. Every evaluation run (live or `--retroactive`) appends to a versioned history file rather than overwriting the previous result.
 
 ## Files
 
@@ -144,6 +148,8 @@ This skill ships with ready-to-use scripts. On first load, the agent checks if t
 | `scripts/skill_index.py` | Scan `~/.hermes/skills/` → structured JSON index |
 | `scripts/analyze.py` | Format NDJSON sessions for LLM consumption |
 | `scripts/proposal.py` | Proposal schema, I/O, and `apply_proposal()` logic |
+| `scripts/evaluate.py` | Evaluation gate: deterministic + LLM-judge + regression evaluators, versioned history |
+| `scripts/optimize_skill.py` | Optional GEPA-lite optimizer — drafts proposals from low-scoring history (needs `dspy`) |
 | `scripts/state.py` | Track processed sessions in JSON state file |
 | `scripts/skill-evolution-fetch.sh` | Cron wrapper (sets CWD, calls fetch_sessions) |
 
@@ -152,7 +158,23 @@ This skill ships with ready-to-use scripts. On first load, the agent checks if t
 - Python 3.10+
 - Hermes Agent (any version with `state.db`, `cronjob`, `skill_manage`, `write_file`)
 
-No pip packages required beyond Python stdlib.
+No pip packages required beyond Python stdlib for the core pipeline. `dspy>=3.0.0` is an optional extra (`pip install -e ".[optimizer]"`) needed only for `scripts/optimize_skill.py`.
+
+## Evaluation Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SKILL_EVOLUTION_EVALUATORS` | `deterministic,llm_judge,regression` | Which evaluators run |
+| `SKILL_EVOLUTION_GATE_STRICTNESS` | `strict` | `strict` (all must pass) or `majority`; per-type override via `SKILL_EVOLUTION_GATE_STRICTNESS_<TYPE>` |
+| `SKILL_EVOLUTION_MAX_SKILL_SIZE_KB` | `15` | Deterministic size limit |
+| `SKILL_EVOLUTION_MAX_GROWTH_PCT` | `20` | Deterministic growth-vs-baseline limit |
+| `SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD` | `0.7` | Minimum average rubric score to pass |
+| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude` or `ollama`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER` |
+| `SKILL_EVOLUTION_CLAUDE_MODEL` | `claude-sonnet-5` | Model used by the Claude provider adapter |
+| `SKILL_EVOLUTION_OLLAMA_BASE_URL` / `_MODEL` | `http://localhost:11434/v1` / `llama3` | Local-model provider adapter config |
+| `SKILL_EVOLUTION_HISTORY_PATH` | `docs/skill-evolution/eval_history.jsonl` | Shared eval history file |
+| `SKILL_EVOLUTION_HISTORY_RETENTION` | unbounded | Max versions (bare int) or age (`90d`, `6mo`); always keeps the latest entry per target |
+| `SKILL_EVOLUTION_OPTIMIZER_ENABLED` | `false` | Enables `scripts/optimize_skill.py` |
 
 ## Safety
 
