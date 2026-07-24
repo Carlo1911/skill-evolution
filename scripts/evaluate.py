@@ -318,6 +318,77 @@ def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: O
     return PROVIDER_CALLERS[resolved](safe_prompt, timeout=timeout)
 
 
+# ── Deterministic evaluator (size/growth/YAML structure) ────────────
+
+MAX_SKILL_SIZE_KB_ENV_VAR = "SKILL_EVOLUTION_MAX_SKILL_SIZE_KB"
+MAX_GROWTH_PCT_ENV_VAR = "SKILL_EVOLUTION_MAX_GROWTH_PCT"
+DEFAULT_MAX_SKILL_SIZE_KB = 15
+DEFAULT_MAX_GROWTH_PCT = 20.0
+
+
+def _extract_frontmatter_fields(content: str) -> Dict[str, str]:
+    """Extract name/description from YAML-ish frontmatter (skill_index.py's parsing style).
+
+    Raises ValueError naming the specific missing/malformed field.
+    """
+    if not content.startswith("---"):
+        raise ValueError("missing frontmatter: content does not start with '---'")
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        raise ValueError("missing frontmatter: no closing '---' delimiter found")
+
+    fields: Dict[str, str] = {}
+    for line in parts[1].split("\n"):
+        line = line.strip()
+        if line.startswith("name:"):
+            fields["name"] = line.split(":", 1)[1].strip().strip("'\"")
+        elif line.startswith("description:"):
+            fields["description"] = line.split(":", 1)[1].strip().strip("'\"")
+
+    if not fields.get("name"):
+        raise ValueError("missing required frontmatter field: name")
+    if not fields.get("description"):
+        raise ValueError("missing required frontmatter field: description")
+    return fields
+
+
+class DeterministicEvaluator(Evaluator):
+    """Binary size/growth/YAML-structure check (R3, R10)."""
+
+    name = "deterministic"
+
+    def evaluate(self, content: str, context: Optional[Dict[str, Any]] = None) -> EvalResult:
+        context = context or {}
+        size_bytes = len(content.encode("utf-8"))
+        max_kb = float(os.environ.get(MAX_SKILL_SIZE_KB_ENV_VAR, DEFAULT_MAX_SKILL_SIZE_KB))
+        max_bytes = max_kb * 1024
+        if size_bytes > max_bytes:
+            return EvalResult(
+                score=0.0, passed=False, evaluator_name=self.name,
+                feedback=f"size {size_bytes}B exceeds {int(max_bytes)}B limit ({max_kb:g}KB)",
+            )
+
+        baseline_size = context.get("baseline_size")
+        if baseline_size:
+            growth_pct = ((size_bytes - baseline_size) / baseline_size) * 100
+            max_growth = float(os.environ.get(MAX_GROWTH_PCT_ENV_VAR, DEFAULT_MAX_GROWTH_PCT))
+            if growth_pct > max_growth:
+                return EvalResult(
+                    score=0.0, passed=False, evaluator_name=self.name,
+                    feedback=f"growth {growth_pct:.1f}% exceeds {max_growth:g}% limit over baseline",
+                )
+
+        try:
+            _extract_frontmatter_fields(content)
+        except ValueError as e:
+            return EvalResult(score=0.0, passed=False, evaluator_name=self.name, feedback=str(e))
+
+        return EvalResult(score=1.0, passed=True, evaluator_name=self.name, feedback="all deterministic checks passed")
+
+
+register_evaluator("deterministic", DeterministicEvaluator)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Skill evolution evaluation tools")
