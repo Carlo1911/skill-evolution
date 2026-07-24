@@ -135,7 +135,7 @@ def save_proposal(proposal: SkillEvolutionProposal, directory: Optional[str] = N
     proposals_dir = directory or get_proposals_dir()
     os.makedirs(proposals_dir, exist_ok=True)
     path = os.path.join(proposals_dir, f"{proposal.proposal_id}.md")
-    content = evaluate.redact_secrets(proposal.render())  # R19: redact before persisting to disk
+    content = evaluate.redact_secrets(proposal.render())  # redact secrets before persisting to disk
     with open(path, "w") as f:
         f.write(content)
     return path
@@ -277,25 +277,8 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
     if proposal.confidence < min_confidence:
         raise ValueError(f"Confidence {proposal.confidence:.2f} below threshold {min_confidence:.2f}")
 
-    # Evaluation gate (R4, R21): run after status/confidence, before mutating the proposal.
-    target = evaluate.target_key_for_proposal(proposal)
-    eval_results = evaluate.evaluate_skill_text(proposal)
-
-    strictness = evaluate.resolve_gate_strictness(proposal.type.value)
-    gate_passed = evaluate.combine_gate(eval_results, strictness)
-
-    combined_score = (
-        sum(r.score for r in eval_results) / len(eval_results) if eval_results else 1.0
-    )
-    combined_feedback = (
-        "; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in eval_results)
-        or "no evaluators configured"
-    )
-    combined_result = evaluate.EvalResult(
-        score=combined_score, passed=gate_passed, evaluator_name="gate", feedback=combined_feedback,
-    )
-    evaluate.append_history(target, combined_result, session_ids=proposal.session_ids)
-
+    # Evaluation gate: run after status/confidence, before mutating the proposal.
+    eval_results, _, gate_passed = evaluate.evaluate_and_record(proposal)
     evaluation_results = [asdict(r) for r in eval_results]
 
     if not gate_passed:

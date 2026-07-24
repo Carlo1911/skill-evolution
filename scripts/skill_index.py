@@ -16,6 +16,27 @@ from pathlib import Path
 SKILLS_DIR = os.path.expanduser("~/.hermes/skills")
 
 
+def parse_name_description_frontmatter(content: str) -> dict:
+    """Extract name/description fields from a SKILL.md-style YAML frontmatter block.
+
+    Returns an empty (or partial) dict when frontmatter is missing or has no
+    closing delimiter -- callers decide whether that's an error.
+    """
+    fields = {}
+    if not content.startswith("---"):
+        return fields
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return fields
+    for line in parts[1].split("\n"):
+        line = line.strip()
+        if line.startswith("name:"):
+            fields["name"] = line.split(":", 1)[1].strip().strip("'\"")
+        elif line.startswith("description:"):
+            fields["description"] = line.split(":", 1)[1].strip().strip("'\"")
+    return fields
+
+
 def scan_skills(skills_dir: str = SKILLS_DIR) -> list:
     """Scan skills directory and return structured index."""
     base = Path(skills_dir)
@@ -36,20 +57,9 @@ def scan_skills(skills_dir: str = SKILLS_DIR) -> list:
                 continue
 
             content = skill_md.read_text()
-            name = skill_dir.name
-            description = ""
-
-            # Parse frontmatter for name + description
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    frontmatter = parts[1]
-                    for line in frontmatter.split("\n"):
-                        line = line.strip()
-                        if line.startswith("name:"):
-                            name = line.split(":", 1)[1].strip().strip("'\"")
-                        elif line.startswith("description:"):
-                            description = line.split(":", 1)[1].strip().strip("'\"")
+            fields = parse_name_description_frontmatter(content)
+            name = fields.get("name", skill_dir.name)
+            description = fields.get("description", "")
 
             results.append({
                 "name": name,

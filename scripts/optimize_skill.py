@@ -63,7 +63,7 @@ def draft_proposal_for_target(entry: Dict[str, Any]):
     return proposal_module.SkillEvolutionProposal(
         type=proposal_module.ProposalType.IMPROVE_EXISTING,
         target_skill=skill_name,
-        confidence=0.5,  # the evaluation gate (R15), not this confidence, is the real check
+        confidence=0.5,  # the evaluation gate, not this confidence, is the real check
         summary=f"Optimizer-proposed improvement for {skill_name}",
         rationale=f"Low score ({entry.get('score')}) with feedback: {feedback}",
         proposed_changes=[proposal_module.ProposedChange(
@@ -78,9 +78,9 @@ def run_optimizer(history_path: Optional[str] = None, proposals_dir: Optional[st
     """Draft and save proposals for every low-scoring target.
 
     Only saves proposals (status: proposed) via the normal save_proposal() path
-    (U10) -- it never calls apply_proposal() itself, so optimizer-originated
+    -- it never calls apply_proposal() itself, so optimizer-originated
     proposals go through the exact same evaluation gate as any other
-    proposal, with no auto-apply bypass (R15).
+    proposal, with no auto-apply bypass.
     """
     _require_dspy()
     import proposal as proposal_module
