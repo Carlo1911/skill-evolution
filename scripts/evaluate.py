@@ -620,10 +620,75 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     return run_evaluators(content, target)
 
 
+# ── Retroactive/batch re-evaluation (R12, R13) ───────────────────────
+
+def _select_retroactive_proposals(target: Optional[str] = None, since: Optional[str] = None,
+                                   proposals_dir: Optional[str] = None) -> List[Any]:
+    """Load already-saved proposals from disk, optionally filtered by target key and creation date."""
+    import proposal as proposal_module  # local import: breaks the proposal.py <-> evaluate.py cycle
+
+    proposals = proposal_module.list_proposals(directory=proposals_dir)
+
+    if target:
+        proposals = [p for p in proposals if target_key_for_proposal(p) == target]
+
+    if since:
+        cutoff = datetime.fromisoformat(since)
+        selected = []
+        for p in proposals:
+            try:
+                created = datetime.fromisoformat(getattr(p, "created_at", ""))
+            except (ValueError, TypeError):
+                continue
+            if created >= cutoff:
+                selected.append(p)
+        proposals = selected
+
+    return proposals
+
+
+def retroactive_reevaluate(target: Optional[str] = None, since: Optional[str] = None,
+                            proposals_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Re-run evaluation against already-saved proposals (R12, R13).
+
+    Appends a fresh combined history entry per proposal target rather than
+    mutating or overwriting any existing entry for that target.
+    """
+    proposals = _select_retroactive_proposals(target, since, proposals_dir)
+
+    summaries = []
+    for p in proposals:
+        eval_results = evaluate_skill_text(p)
+        proposal_target = target_key_for_proposal(p)
+        combined_score = sum(r.score for r in eval_results) / len(eval_results) if eval_results else 1.0
+        proposal_type = getattr(getattr(p, "type", None), "value", "improve_existing")
+        gate_passed = combine_gate(eval_results, resolve_gate_strictness(proposal_type))
+        combined_feedback = (
+            "; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in eval_results)
+            or "no evaluators configured"
+        )
+        combined_result = EvalResult(
+            score=combined_score, passed=gate_passed, evaluator_name="gate", feedback=combined_feedback,
+        )
+        append_history(proposal_target, combined_result, session_ids=getattr(p, "session_ids", []))
+        summaries.append({
+            "target": proposal_target,
+            "proposal_id": getattr(p, "proposal_id", None),
+            "score": combined_score,
+            "passed": gate_passed,
+        })
+
+    return summaries
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Skill evolution evaluation tools")
     parser.add_argument("--list-evaluators", action="store_true", help="Print the resolved evaluator list")
+    parser.add_argument("--retroactive", action="store_true", help="Re-run evaluation against already-saved proposals")
+    parser.add_argument("--target", type=str, default=None, help="Filter retroactive re-evaluation to a single target")
+    parser.add_argument("--since", type=str, default=None, help="Only re-evaluate proposals created at/after this ISO date")
+    parser.add_argument("--dry-run", action="store_true", help="With --retroactive, report what would run without appending history")
     args = parser.parse_args()
 
     if args.list_evaluators:
@@ -634,6 +699,20 @@ def main():
             sys.exit(1)
         for ev in evaluators:
             print(ev.name)
+
+    if args.retroactive:
+        proposals = _select_retroactive_proposals(args.target, args.since)
+        if not proposals:
+            print("Nothing to re-evaluate: no matching proposals found", file=sys.stderr)
+            return
+
+        if args.dry_run:
+            for p in proposals:
+                print(f"Would re-evaluate {target_key_for_proposal(p)} (proposal {getattr(p, 'proposal_id', '?')})")
+            return
+
+        for summary in retroactive_reevaluate(args.target, args.since):
+            print(f"{summary['target']}: score={summary['score']:.2f} passed={summary['passed']}")
 
 
 if __name__ == "__main__":
