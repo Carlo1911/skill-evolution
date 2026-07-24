@@ -471,6 +471,55 @@ class LLMJudgeEvaluator(Evaluator):
 register_evaluator("llm_judge", LLMJudgeEvaluator)
 
 
+# ── Regression evaluator (compares against the target's own history) ─
+
+class RegressionEvaluator(Evaluator):
+    """Compares a target's new score against its own previous history entry (R3, R10).
+
+    Expects `context` to carry 'target' (history bucket key) and 'new_score'
+    (this run's score, supplied by the caller/gate).
+    """
+
+    name = "regression"
+
+    def evaluate(self, content: str, context: Optional[Dict[str, Any]] = None) -> EvalResult:
+        context = context or {}
+        target = context.get("target")
+        new_score = context.get("new_score")
+
+        if target is None or new_score is None:
+            return EvalResult(
+                score=0.0, passed=False, evaluator_name=self.name,
+                feedback="regression evaluator requires 'target' and 'new_score' in context",
+            )
+
+        entries = read_history(target)
+        if not entries:
+            return EvalResult(
+                score=float(new_score), passed=True, evaluator_name=self.name,
+                feedback="no baseline yet — nothing to regress against",
+            )
+
+        previous_entry = entries[-1]
+        try:
+            previous_score = float(previous_entry["score"])
+        except (KeyError, TypeError, ValueError) as e:
+            return EvalResult(
+                score=0.0, passed=False, evaluator_name=self.name,
+                feedback=f"regression evaluator failed closed: corrupted history entry ({e})",
+            )
+
+        passed = float(new_score) >= previous_score
+        status = "no regression" if passed else "regression detected"
+        return EvalResult(
+            score=float(new_score), passed=passed, evaluator_name=self.name,
+            feedback=f"new score {new_score} vs previous {previous_score} ({status})",
+        )
+
+
+register_evaluator("regression", RegressionEvaluator)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Skill evolution evaluation tools")
