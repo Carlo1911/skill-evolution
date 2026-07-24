@@ -253,23 +253,6 @@ def _parse_frontmatter(text: str) -> dict:
     return data
 
 
-def _evaluation_target(proposal: SkillEvolutionProposal) -> str:
-    """Return the history-store target key for a proposal (v1: skill-text)."""
-    return f"skill:{proposal.target_skill}" if proposal.target_skill else f"proposal:{proposal.proposal_id}"
-
-
-def _extract_evaluation_content(proposal: SkillEvolutionProposal) -> str:
-    """Extract the skill-text content to evaluate from a proposal (R5, R6).
-
-    Prefers a 'body' or 'description' proposed_changes new_value; falls back to
-    summary + rationale for proposal shapes without either (e.g. merge_skills).
-    """
-    for change in proposal.proposed_changes:
-        if change.field in ("body", "description") and change.new_value:
-            return change.new_value
-    return f"{proposal.summary}\n\n{proposal.rationale}"
-
-
 def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.85,
                    directory: Optional[str] = None) -> dict:
     """Validate a proposal, run the evaluation gate, and return the action descriptor for skill_manage.
@@ -294,9 +277,8 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
         raise ValueError(f"Confidence {proposal.confidence:.2f} below threshold {min_confidence:.2f}")
 
     # Evaluation gate (R4, R21): run after status/confidence, before mutating the proposal.
-    target = _evaluation_target(proposal)
-    content = _extract_evaluation_content(proposal)
-    eval_results = evaluate.run_evaluators(content, target)
+    target = evaluate.target_key_for_proposal(proposal)
+    eval_results = evaluate.evaluate_skill_text(proposal)
 
     strictness = evaluate.resolve_gate_strictness(proposal.type.value)
     gate_passed = evaluate.combine_gate(eval_results, strictness)

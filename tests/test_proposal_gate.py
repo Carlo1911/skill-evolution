@@ -132,7 +132,7 @@ def test_combined_result_appended_to_history_exactly_once_on_pass(monkeypatch, i
     proposal = _make_proposal()
     apply_proposal(proposal, min_confidence=0.5)
 
-    entries = evaluate.read_history(proposal_module._evaluation_target(proposal))
+    entries = evaluate.read_history(evaluate.target_key_for_proposal(proposal))
     assert len(entries) == 1
     assert entries[0]["evaluator_name"] == "gate"
 
@@ -142,7 +142,7 @@ def test_combined_result_appended_to_history_exactly_once_on_fail(monkeypatch, i
     proposal = _make_proposal()
     apply_proposal(proposal, min_confidence=0.5)
 
-    entries = evaluate.read_history(proposal_module._evaluation_target(proposal))
+    entries = evaluate.read_history(evaluate.target_key_for_proposal(proposal))
     assert len(entries) == 1
     assert entries[0]["evaluator_name"] == "gate"
     assert entries[0]["passed"] is False

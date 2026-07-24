@@ -583,6 +583,43 @@ def combine_gate(results: List[EvalResult], strictness: str) -> bool:
     raise ValueError(f"Unknown gate strictness '{strictness}'. Available: strict, majority")
 
 
+# ── Skill-text evaluation target (R5 v1 scope) ───────────────────────
+#
+# A fast-follow target (e.g. evaluate_tool_calls(session)) can be added as a
+# sibling function reusing the same registry (U1) and gate (run_evaluators)
+# without modifying this function or apply_proposal()'s call site (KD2).
+
+def target_key_for_proposal(proposal: Any) -> str:
+    """Return the shared history-store target key for a proposal (duck-typed, no proposal.py import)."""
+    target_skill = getattr(proposal, "target_skill", None)
+    proposal_id = getattr(proposal, "proposal_id", "unknown")
+    return f"skill:{target_skill}" if target_skill else f"proposal:{proposal_id}"
+
+
+def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
+    """Evaluate a proposal's skill-text content end to end (R5, R6).
+
+    Extracts the skill body/description change from `proposal.proposed_changes`,
+    falling back to summary+rationale for proposal shapes without one (e.g.
+    merge_skills, which has no single body/description field) so nothing is
+    silently skipped, then runs the extracted content through the enabled
+    evaluators (U1-U6) and gate combination.
+    """
+    target = target_key_for_proposal(proposal)
+
+    content = None
+    for change in getattr(proposal, "proposed_changes", []):
+        if getattr(change, "field", None) in ("body", "description") and getattr(change, "new_value", None):
+            content = change.new_value
+            break
+    if content is None:
+        summary = getattr(proposal, "summary", "")
+        rationale = getattr(proposal, "rationale", "")
+        content = f"{summary}\n\n{rationale}"
+
+    return run_evaluators(content, target)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Skill evolution evaluation tools")
