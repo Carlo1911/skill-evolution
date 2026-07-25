@@ -205,6 +205,51 @@ def test_query_runs_against_live_schema_column_names(db_path):
     assert results[0]["started_at"] == 12345.0
 
 
+def test_long_message_content_is_truncated(db_path):
+    conn = sqlite3.connect(db_path)
+    _insert_session(conn, "sess-long")
+    _insert_message(
+        conn, "sess-long", "assistant", tool_calls=_tool_call("skill_view", "my-skill")
+    )
+    long_content = "x" * (fetch_sessions.MAX_MESSAGE_CHARS + 500)
+    _insert_message(conn, "sess-long", "user", content=long_content)
+    conn.commit()
+    conn.close()
+
+    results = fetch_sessions.sessions_for_skill("my-skill", db_path=db_path)
+
+    preview = next(m for m in results[0]["messages"] if m["role"] == "user")
+    assert preview["content_length"] == fetch_sessions.MAX_MESSAGE_CHARS + len("\n[...truncated]")
+    assert preview["content_preview"] == (
+        long_content[:fetch_sessions.MAX_MESSAGE_CHARS] + "\n[...truncated]"
+    )[:500]
+
+
+def test_malformed_tool_calls_json_does_not_crash_query(db_path):
+    """The json_valid() SQL guards must filter out malformed tool_calls/arguments
+    rather than raising sqlite3.OperationalError: malformed JSON."""
+    conn = sqlite3.connect(db_path)
+    _insert_session(conn, "sess-malformed")
+    _insert_message(conn, "sess-malformed", "assistant", tool_calls="not valid json{{{")
+    _insert_session(conn, "sess-bad-args")
+    _insert_message(
+        conn,
+        "sess-bad-args",
+        "assistant",
+        tool_calls=json.dumps([{
+            "id": "call_1", "type": "function",
+            "function": {"name": "skill_view", "arguments": "not valid json{{{"},
+        }]),
+    )
+    conn.commit()
+    conn.close()
+
+    # Must not raise; neither malformed row matches, so no sessions come back.
+    results = fetch_sessions.sessions_for_skill("my-skill", db_path=db_path)
+
+    assert results == []
+
+
 def test_max_sessions_caps_and_prefers_most_recent(db_path):
     """Regression: an unbounded match count must not grow the returned excerpt
     set without limit -- cap at max_sessions, keeping the most recent."""

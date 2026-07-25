@@ -98,6 +98,10 @@ def test_prompt_boundary_is_unpredictable_per_call():
     assert prompt_a != prompt_b
 
 
+def test_format_session_excerpts_empty_list_returns_placeholder_text():
+    assert optimize_skill._format_session_excerpts([]) == "(no session history available for this skill)"
+
+
 def test_malformed_json_response_fails_closed(monkeypatch):
     monkeypatch.setattr(evaluate, "call_provider", lambda prompt, evaluator_name=None: "not json at all")
 

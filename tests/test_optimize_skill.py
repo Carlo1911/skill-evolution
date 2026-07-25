@@ -233,6 +233,26 @@ def test_reflection_lm_routes_through_call_provider(tmp_path, monkeypatch):
     assert captured_calls[0][1] == optimize_skill.GEPA_REFLECTION_EVALUATOR_NAME
 
 
+def test_reflection_lm_adapter_flattens_chat_message_list_input(monkeypatch):
+    """_reflection_lm_adapter's docstring documents accepting gepa's chat-message-list
+    form (list[dict]), not just a plain string -- exercise that path directly."""
+    captured = {}
+
+    def fake_call_provider(prompt, provider=None, evaluator_name=None, timeout=60):
+        captured["prompt"] = prompt
+        return "ok"
+
+    monkeypatch.setattr(evaluate, "call_provider", fake_call_provider)
+
+    result = optimize_skill._reflection_lm_adapter([
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Propose a better candidate."},
+    ])
+
+    assert result == "ok"
+    assert captured["prompt"] == "You are a helpful assistant.\n\nPropose a better candidate."
+
+
 def test_iterations_zero_is_respected_not_treated_as_unset(tmp_path, monkeypatch):
     """Regression: `iterations or DEFAULT` treats an explicit 0 as falsy and
     silently substitutes the default budget instead of honoring the caller's
@@ -375,6 +395,16 @@ def test_draft_proposal_from_gepa_result_uses_optimized_candidate_not_placeholde
     assert drafted.proposed_changes[0].new_value == "This is the real optimized candidate body."
     # Must not be the old placeholder shape.
     assert "Address this feedback and revise" not in drafted.proposed_changes[0].new_value
+
+
+def test_draft_proposal_from_gepa_result_omits_call_count_when_absent():
+    """total_metric_calls is optional on a GEPAResult-shaped object; the rationale
+    must still render correctly (no crash, no dangling sentence) when it's None."""
+    result = _make_gepa_result(total_metric_calls=None)
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+    assert "Total metric calls used" not in drafted.rationale
 
 
 def test_draft_proposal_from_gepa_result_rationale_reports_winner_and_runner_up():
@@ -596,6 +626,24 @@ def test_no_flags_prints_usage_message_not_auto_scan(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "--skill" in (captured.out + captured.err)
     assert "--list-candidates" in (captured.out + captured.err)
+
+
+def test_skill_flag_runtime_error_prints_message_and_exits_nonzero(monkeypatch, capsys):
+    """main()'s --skill path catches RuntimeError (e.g. from a missing gepa install)
+    and exits 1 with the message on stderr, instead of an uncaught traceback."""
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--skill", "some-skill"])
+
+    def fake_run_skill(skill_name, iterations):
+        raise RuntimeError("The optional optimizer dependency 'gepa' is not installed.")
+    monkeypatch.setattr(optimize_skill, "_run_skill", fake_run_skill)
+
+    with pytest.raises(SystemExit) as exc_info:
+        optimize_skill.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "not installed" in captured.err
 
 
 def test_skill_flag_not_enough_history_prints_message_and_no_proposal(monkeypatch, capsys, isolated_dirs):
