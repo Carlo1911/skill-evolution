@@ -282,6 +282,25 @@ def test_unknown_skill_raises_value_error(monkeypatch):
         optimize_skill.run_gepa_optimization("does-not-exist")
 
 
+def test_ambiguous_skill_name_across_categories_raises_value_error(monkeypatch):
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "dup-skill", "category": "cat-a", "description": "", "path": "/a/SKILL.md", "size": 5},
+        {"name": "dup-skill", "category": "cat-b", "description": "", "path": "/b/SKILL.md", "size": 5},
+    ])
+    with pytest.raises(ValueError, match="ambiguous"):
+        optimize_skill.run_gepa_optimization("dup-skill")
+
+
+def test_skill_file_deleted_between_scan_and_read_raises_clear_runtime_error(tmp_path, monkeypatch):
+    """TOCTOU: the file can vanish between scan_skills() and open()."""
+    missing_path = str(tmp_path / "does-not-exist" / "SKILL.md")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "vanishing-skill", "category": "cat", "description": "", "path": missing_path, "size": 5},
+    ])
+    with pytest.raises(RuntimeError, match="Could not read skill file"):
+        optimize_skill.run_gepa_optimization("vanishing-skill")
+
+
 def test_require_gepa_missing_dependency_gives_clear_actionable_message(monkeypatch):
     import builtins
     real_import = builtins.__import__

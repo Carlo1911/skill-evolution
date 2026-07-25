@@ -201,7 +201,10 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
 
     Returns the raw gepa.GEPAResult (exposing at least .best_candidate,
     .val_aggregate_scores, .best_idx, .total_metric_calls) on completion. Raises
-    ValueError if no installed skill matches `skill_name`.
+    ValueError if no installed skill matches `skill_name`, or if more than one
+    installed skill shares that name across categories (ambiguous -- silently
+    picking one could optimize the wrong skill's body against another's
+    session evidence).
     """
     import fetch_sessions
     import skill_index
@@ -209,8 +212,19 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
     if not matches:
         raise ValueError(f"No installed skill found matching name '{skill_name}'")
-    with open(matches[0]["path"]) as f:
-        seed_body = f.read()
+    if len(matches) > 1:
+        categories = ", ".join(m.get("category", "?") for m in matches)
+        raise ValueError(
+            f"Skill name '{skill_name}' is ambiguous -- found in multiple categories "
+            f"({categories}). Resolve the duplicate name before running the optimizer."
+        )
+    try:
+        with open(matches[0]["path"]) as f:
+            seed_body = f.read()
+    except OSError as e:
+        raise RuntimeError(
+            f"Could not read skill file for '{skill_name}' at {matches[0]['path']!r}: {e}"
+        ) from e
 
     sessions = fetch_sessions.sessions_for_skill(skill_name)
     if len(sessions) < MIN_SESSIONS:
