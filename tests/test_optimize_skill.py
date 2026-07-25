@@ -233,6 +233,49 @@ def test_reflection_lm_routes_through_call_provider(tmp_path, monkeypatch):
     assert captured_calls[0][1] == optimize_skill.GEPA_REFLECTION_EVALUATOR_NAME
 
 
+def test_iterations_zero_is_respected_not_treated_as_unset(tmp_path, monkeypatch):
+    """Regression: `iterations or DEFAULT` treats an explicit 0 as falsy and
+    silently substitutes the default budget instead of honoring the caller's
+    override."""
+    skill_md_path = _make_fake_skill(tmp_path, name="zero-iter-skill")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "zero-iter-skill", "category": "cat", "description": "", "path": skill_md_path, "size": 5},
+    ])
+    monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(5))
+
+    capture = {}
+    fake_gepa = _make_fake_gepa(capture=capture)
+    monkeypatch.setattr(optimize_skill, "_require_gepa", lambda: fake_gepa)
+
+    optimize_skill.run_gepa_optimization("zero-iter-skill", iterations=0)
+
+    assert capture["config"].engine.max_metric_calls == 0
+
+
+def test_reflection_lm_fails_closed_on_provider_error(tmp_path, monkeypatch):
+    """A transient provider failure during reflection must not raise into gepa's
+    loop and abort the whole run -- it returns an empty string for that round."""
+    skill_md_path = _make_fake_skill(tmp_path, name="reflection-fail-skill")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "reflection-fail-skill", "category": "cat", "description": "", "path": skill_md_path, "size": 5},
+    ])
+    monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(5))
+
+    def failing_call_provider(prompt, provider=None, evaluator_name=None, timeout=60):
+        raise evaluate.ProviderError("provider is down")
+
+    monkeypatch.setattr(evaluate, "call_provider", failing_call_provider)
+
+    capture = {}
+    fake_gepa = _make_fake_gepa(capture=capture)
+    monkeypatch.setattr(optimize_skill, "_require_gepa", lambda: fake_gepa)
+
+    optimize_skill.run_gepa_optimization("reflection-fail-skill")
+
+    reflection_lm = capture["config"].reflection.reflection_lm
+    assert reflection_lm("propose a better version") == ""
+
+
 def test_unknown_skill_raises_value_error(monkeypatch):
     monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
     with pytest.raises(ValueError, match="No installed skill"):

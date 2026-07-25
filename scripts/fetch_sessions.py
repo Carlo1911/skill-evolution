@@ -191,14 +191,22 @@ SKILL_MESSAGE_QUERY = """
 """
 
 
-def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
-    """Return a skill's full recorded session history.
+DEFAULT_MAX_SESSIONS_FOR_SKILL = 20
+
+
+def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH,
+                        max_sessions: int = DEFAULT_MAX_SESSIONS_FOR_SKILL) -> List[Dict[str, Any]]:
+    """Return a skill's most recent recorded session history, most-recent first.
 
     Unlike fetch_sessions(), this is not gated by the cron pipeline's
     processed-state or lookback window, and has no side effects (it never
     calls mark_processed() or touches the state file). A session is matched
     when one of its messages recorded a `skill_view` or `skill_manage` tool
     call whose arguments name this skill.
+
+    Capped at `max_sessions` (most recent by `started_at`) so a popular skill's
+    accumulated history doesn't grow the rendered excerpt text -- and therefore
+    every downstream LLM prompt built from it -- without bound.
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -253,7 +261,8 @@ def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH) -> List[
                 "messages": msg_summary,
             })
 
-        return results
+        results.sort(key=lambda r: r["started_at"] or 0, reverse=True)
+        return results[:max_sessions]
     finally:
         conn.close()
 

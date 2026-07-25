@@ -205,6 +205,22 @@ def test_query_runs_against_live_schema_column_names(db_path):
     assert results[0]["started_at"] == 12345.0
 
 
+def test_max_sessions_caps_and_prefers_most_recent(db_path):
+    """Regression: an unbounded match count must not grow the returned excerpt
+    set without limit -- cap at max_sessions, keeping the most recent."""
+    conn = sqlite3.connect(db_path)
+    for i in range(5):
+        sid = f"sess-{i}"
+        _insert_session(conn, sid, started_at=float(i))  # sess-4 is most recent
+        _insert_message(conn, sid, "assistant", tool_calls=_tool_call("skill_view", "my-skill"))
+    conn.commit()
+    conn.close()
+
+    results = fetch_sessions.sessions_for_skill("my-skill", db_path=db_path, max_sessions=2)
+
+    assert [r["session_id"] for r in results] == ["sess-4", "sess-3"]
+
+
 def test_no_side_effects_no_state_file_written(db_path, tmp_path, monkeypatch):
     """sessions_for_skill() must not call mark_processed() or touch the
     cron pipeline's state file."""

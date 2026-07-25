@@ -166,12 +166,21 @@ def _reflection_lm_adapter(prompt):
     LLM that proposes each new candidate) routes through this repo's
     evaluate.call_provider() -- and its redaction/provider-resolution posture -- instead
     of falling through to gepa's own litellm-based default (which isn't installed here).
+
+    Fails closed like score_candidate(): a transient provider error here must not abort
+    the whole multi-round optimization run and discard every candidate already explored.
+    Returning an empty string yields an empty candidate proposal for this one round, which
+    score_candidate() will then score poorly on its own merits and gepa's own selection
+    naturally discards -- not a crash.
     """
     import evaluate
 
     if isinstance(prompt, list):
         prompt = "\n\n".join(m.get("content", "") for m in prompt if isinstance(m, dict))
-    return evaluate.call_provider(prompt, evaluator_name=GEPA_REFLECTION_EVALUATOR_NAME)
+    try:
+        return evaluate.call_provider(prompt, evaluator_name=GEPA_REFLECTION_EVALUATOR_NAME)
+    except evaluate.ProviderError:
+        return ""
 
 
 def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
@@ -214,7 +223,9 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     gepa = _require_gepa()
     bound_evaluator = functools.partial(score_candidate, sessions=sessions)
     config = gepa.GEPAConfig(
-        engine=gepa.EngineConfig(max_metric_calls=iterations or DEFAULT_MAX_METRIC_CALLS),
+        engine=gepa.EngineConfig(
+            max_metric_calls=iterations if iterations is not None else DEFAULT_MAX_METRIC_CALLS
+        ),
         reflection=gepa.ReflectionConfig(reflection_lm=_reflection_lm_adapter),
     )
     return gepa.optimize_anything(
