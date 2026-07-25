@@ -558,8 +558,10 @@ def test_no_flags_prints_usage_message_not_auto_scan(monkeypatch, capsys):
     monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", fail_if_called)
     monkeypatch.setattr(optimize_skill, "run_gepa_optimization", fail_if_called)
 
-    optimize_skill.main()
+    with pytest.raises(SystemExit) as exc_info:
+        optimize_skill.main()
 
+    assert exc_info.value.code == 2
     captured = capsys.readouterr()
     assert "--skill" in (captured.out + captured.err)
     assert "--list-candidates" in (captured.out + captured.err)

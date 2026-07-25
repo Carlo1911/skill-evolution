@@ -33,15 +33,16 @@ python3 scripts/evaluate.py --retroactive --dry-run       # preview batch re-eva
 python3 scripts/evaluate.py --retroactive                 # re-run evaluation against saved proposals, append history
 python3 scripts/evaluate.py --prune                       # prune eval history per SKILL_EVOLUTION_HISTORY_RETENTION
 
-# Optional GEPA-lite optimizer (needs `pip install -e ".[optimizer]"`)
-SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py
+# Optional GEPA optimizer (needs `pip install -e ".[optimizer]"`)
+SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py --list-candidates      # read-only report of low-scoring targets
+SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py --skill <name> [--iterations N]   # run GEPA for one skill
 
 # Tests
 pip install -e ".[dev]"
 pytest
 ```
 
-No build step and no non-stdlib runtime dependencies for the core pipeline. `dspy` is an optional extra (`pip install -e ".[optimizer]"`, aliased as `.[dspy]`) required only by `scripts/optimize_skill.py`; nothing else imports it.
+No build step and no non-stdlib runtime dependencies for the core pipeline. `gepa` (the standalone PyPI package, not `dspy`) is an optional extra (`pip install -e ".[optimizer]"`) required only by `scripts/optimize_skill.py`; nothing else imports it.
 
 ## Architecture
 
@@ -66,7 +67,9 @@ skill_index.py ──JSON index────────────────�
                                                      skill_manage (Hermes tool)
 
 optimize_skill.py (optional, SKILL_EVOLUTION_OPTIMIZER_ENABLED=true)
-  reads eval_history.jsonl for low-scoring targets ──► drafts improve_existing proposals via proposal.save_proposal()
+  --list-candidates: reads eval_history.jsonl, prints low-scoring targets (read-only, no proposal written)
+  --skill <name>: fetch_sessions.sessions_for_skill() ──► gepa.optimize_anything() ──► drafts improve_existing
+                  proposal from the winning candidate via proposal.save_proposal()
   (never calls apply_proposal() itself — optimizer-originated proposals go through the same gate as any other)
 ```
 
@@ -82,10 +85,10 @@ optimize_skill.py (optional, SKILL_EVOLUTION_OPTIMIZER_ENABLED=true)
   - `apply_proposal()` validates `status == proposed` and `confidence >= min_confidence`, then runs the evaluation gate (`evaluate.evaluate_and_record()`) *before* mutating anything. If evaluation raises or the gate fails, it returns `can_apply: False` (with `evaluation_results` and, on a raised exception, `evaluation_error`) and leaves the proposal's status untouched. Only once the gate passes does it build the `skill_manage` instruction dict, flip `status` to `applied`, and rewrite the file. It does not call `skill_manage` itself — this script has no Hermes runtime dependency.
   - `proposal.py` imports `evaluate` at module scope; `evaluate.py` avoids importing `proposal` at module scope (it imports it locally inside `_select_retroactive_proposals`) specifically to break that cycle — keep that direction if you touch either file's imports.
 - **`scripts/evaluate.py`** — the evaluation/gating framework (see "Evaluation framework" below).
-- **`scripts/optimize_skill.py`** — optional "GEPA-lite" optimizer, gated behind `SKILL_EVOLUTION_OPTIMIZER_ENABLED=true` and the optional `dspy` dependency. Reads `evaluate.py`'s history for the latest per-target entries below `DEFAULT_LOW_SCORE_THRESHOLD` (0.6) and drafts an `improve_existing` proposal per low-scoring target via `proposal.save_proposal()`. It never calls `apply_proposal()` — optimizer-drafted proposals re-enter the same human-review/auto-apply gate as any analyst-drafted one. Despite the module docstring's "GEPA-lite" framing, it doesn't currently run `dspy.GEPA` or any DSPy optimization loop — it's a straight history-driven proposal drafter; `_require_dspy()` gates on the dependency being importable but nothing here calls into it yet.
+- **`scripts/optimize_skill.py`** — optional GEPA optimizer, gated behind `SKILL_EVOLUTION_OPTIMIZER_ENABLED=true` and the optional standalone `gepa` PyPI package (not `dspy`). `--list-candidates` prints `find_low_scoring_targets()`'s entries (history below `DEFAULT_LOW_SCORE_THRESHOLD` 0.6) read-only, with no optimization run. `--skill <name> [--iterations N]` runs `run_gepa_optimization()`: resolves the skill's installed `SKILL.md` via `skill_index.scan_skills()` as the seed candidate, fetches that skill's session history via `fetch_sessions.sessions_for_skill()` (capped at `DEFAULT_MAX_SESSIONS_FOR_SKILL`, most recent first; exits cleanly below `MIN_SESSIONS` without importing `gepa` at all), then calls `gepa.optimize_anything()` in Single-Task Search mode, scored by `score_candidate()` (built on `evaluate.py`'s provider/redaction layer, reusing `LLMJudgeEvaluator.parse_and_score()`) with `gepa`'s own reflective-mutation step also routed through that same provider layer via `_reflection_lm_adapter()` rather than `gepa`'s litellm/OpenAI default. `draft_proposal_from_gepa_result()` builds an `improve_existing` proposal from the winning candidate, with a rationale reporting the full explored-candidate frontier. It never calls `apply_proposal()` — optimizer-drafted proposals re-enter the same human-review/auto-apply gate as any analyst-drafted one.
 - **`docs/session-analyzer-prompt.md`** — the actual instructions given to the LLM cron agent: analysis criteria (skill coverage, cross-session patterns, specificity, confidence scoring 0.5–1.0), output format, and rules (skip `source="cron"` sessions, read-only `skill_manage` inspection before proposing, auto-apply gate). Treat this as the "business logic" of the analysis half of the system — the Python scripts are plumbing around it. The evaluation half (`evaluate.py`) is separate: it scores whatever content a proposal already contains, regardless of which agent or prompt produced it.
 - **`docs/plans/2026-07-23-001-feat-skill-evolution-evaluation-plan.md`** — the requirements doc (R1–R22) that `evaluate.py` was built against. Useful as a spec reference for *why* the module is shaped the way it is (e.g. R21 "fail closed" explains the `_run_one`/`_fail` pattern, R20 explains the LLM-judge's random-boundary prompt framing, R11/R13 explain the append-only history).
-- **`docs/integration-plan.md`** — an earlier (partly Spanish) draft plan proposing a `ConstraintValidator`/`constraints.py` and an `LLMJudge`/`fitness.py` ported from an external repo. That plan shipped, but under different names than it originally proposed: `evaluate.py`'s `DeterministicEvaluator` *is* the constraint validator (size/growth/YAML checks), and `LLMJudgeEvaluator` *is* the fitness judge (rubric-based scoring) — there's no separate `constraints.py`/`fitness.py` file. The doc's Phase 3 (GEPA optimizer) is `optimize_skill.py`, in the reduced "GEPA-lite" form described above. Its Phase 2 (`dataset_builder.py`/`skill_quality.py` — synthetic eval datasets and a periodic quality tracker/report) has not been built.
+- **`docs/integration-plan.md`** — an earlier (partly Spanish) draft plan proposing a `ConstraintValidator`/`constraints.py` and an `LLMJudge`/`fitness.py` ported from an external repo. That plan shipped, but under different names than it originally proposed: `evaluate.py`'s `DeterministicEvaluator` *is* the constraint validator (size/growth/YAML checks), and `LLMJudgeEvaluator` *is* the fitness judge (rubric-based scoring) — there's no separate `constraints.py`/`fitness.py` file. The doc's Phase 3 (GEPA optimizer) is `optimize_skill.py`, which now runs a real `gepa.optimize_anything()` loop (see above) rather than the placeholder described in earlier notes. Its Phase 2 (`dataset_builder.py`/`skill_quality.py` — synthetic eval datasets and a periodic quality tracker/report) has not been built; `optimize_skill.py`'s trainset instead comes directly from real recorded sessions.
 
 ### Evaluation framework (`scripts/evaluate.py`)
 
@@ -120,5 +123,5 @@ All four types pass through the same evaluation gate (above) before any instruct
 - Every script is a standalone stdlib-only CLI with its own `argparse` in `main()`, importable for its core function (`fetch_sessions()`, `scan_skills()`, `apply_proposal()`, `run_evaluators()`, etc.) — keep new scripts consistent with this pattern rather than introducing a shared framework/package layout.
 - No PyYAML anywhere by design (`SKILL.md` promises "no pip packages required") — frontmatter is parsed and rendered by hand in both `skill_index.py` and `proposal.py`. If a change needs richer YAML (nested structures beyond flat keys + one-level lists), it likely needs a matching parser update in `_parse_frontmatter`, not just a `render()` change.
 - Auto-apply is opt-in via env vars (`SKILL_EVOLUTION_AUTO_APPLY`, `SKILL_EVOLUTION_MIN_CONFIDENCE`), read by the cron agent/prompt, not by the Python scripts themselves. The evaluation gate inside `apply_proposal()`, by contrast, always runs (it's not behind an opt-in flag) — `SKILL_EVOLUTION_EVALUATORS`/`SKILL_EVOLUTION_GATE_STRICTNESS` only change *which* evaluators run and how strictly, not whether the gate runs at all.
-- `dspy` is imported lazily (`_require_dspy()` inside `optimize_skill.py`, called from `run_optimizer()`/`main()`, not at module import time) so the rest of the pipeline works with the dependency absent — don't move that import to module scope.
+- `gepa` is imported lazily (`_require_gepa()` inside `optimize_skill.py`, called from `run_gepa_optimization()`, not at module import time) so the rest of the pipeline works with the dependency absent — don't move that import to module scope.
 - Tests exist now (`tests/test_*.py`, one file per evaluator/feature area, run via `pytest`) — this replaces an earlier state where `pyproject.toml` configured `pytest` but no `tests/` directory existed. New evaluators or gate behavior should get a matching `tests/test_evaluate_*.py`.

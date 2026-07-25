@@ -373,6 +373,7 @@ def main():
         "Specify either --skill <name> (optionally with --iterations) or --list-candidates.",
         file=sys.stderr,
     )
+    sys.exit(2)
 
 
 if __name__ == "__main__":
