@@ -7,6 +7,7 @@ Usage:
     python proposal.py --show <id>            # Show specific proposal
 """
 
+import base64
 import json
 import os
 import re
@@ -85,9 +86,9 @@ class SkillEvolutionProposal:
             for c in self.proposed_changes:
                 entry = f"  - field: {c.field}"
                 if c.old_value is not None:
-                    entry += f"\n    old_value: \"{c.old_value}\""
+                    entry += f"\n    old_value: \"{_encode_frontmatter_value(c.old_value)}\""
                 if c.new_value is not None:
-                    entry += f"\n    new_value: \"{c.new_value}\""
+                    entry += f"\n    new_value: \"{_encode_frontmatter_value(c.new_value)}\""
                 if c.description:
                     entry += f"\n    description: \"{c.description}\""
                 lines.append(entry)
@@ -190,6 +191,40 @@ def list_proposals(directory: Optional[str] = None) -> List[SkillEvolutionPropos
     return proposals
 
 
+def _encode_frontmatter_value(value: str) -> str:
+    """Escape a proposed-change value for the hand-rolled frontmatter parser.
+
+    load_proposal() finds the frontmatter block by matching up to the first
+    "\\n---\\n", and _parse_frontmatter() reads change fields line-by-line. A
+    multi-line value containing its own "---" (e.g. a GEPA-optimized skill
+    body, which starts with its own YAML frontmatter) corrupts both: the outer
+    match truncates early, and the per-line reader misreads embedded colons
+    and quotes. Base64-encode only when the value contains a newline or
+    "---" -- the base64 alphabet has no "-", quote, colon, or newline, so the
+    encoded form is always safe here. Short single-line values (the common
+    case) are returned untouched so existing proposal files keep rendering
+    exactly as before.
+
+    Redacts secrets from the value *before* encoding it: save_proposal()'s
+    whole-document redaction pass is line-based and would not recognize a
+    secret pattern once it's hidden inside a base64 blob, so redaction must
+    happen on the plaintext first or it would silently stop applying to this
+    field the moment a value needs encoding.
+    """
+    value = evaluate.redact_secrets(value)
+    if "\n" in value or "---" in value:
+        encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+        return f"b64:{encoded}"
+    return value
+
+
+def _decode_frontmatter_value(value: str) -> str:
+    """Reverse _encode_frontmatter_value(); a value with no "b64:" prefix is returned as-is."""
+    if value.startswith("b64:"):
+        return base64.b64decode(value[4:]).decode("utf-8")
+    return value
+
+
 def _parse_frontmatter(text: str) -> dict:
     """Simple YAML-like frontmatter parser."""
     data = {}
@@ -217,7 +252,11 @@ def _parse_frontmatter(text: str) -> dict:
         if in_change and line.startswith("    "):
             kv = line_stripped.split(":", 1)
             if len(kv) == 2:
-                change_block[kv[0].strip()] = kv[1].strip().strip('"')
+                change_key = kv[0].strip()
+                change_value = kv[1].strip().strip('"')
+                if change_key in ("old_value", "new_value"):
+                    change_value = _decode_frontmatter_value(change_value)
+                change_block[change_key] = change_value
             continue
         elif in_change and not line.startswith("    "):
             if change_block:
