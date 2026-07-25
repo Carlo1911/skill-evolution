@@ -76,6 +76,41 @@ def contains_secret(text: str) -> bool:
     return any(pattern.lower() in text_lower for pattern in SECRET_PATTERNS)
 
 
+def _summarize_messages(messages) -> tuple:
+    """Redact, truncate, and shape a session's message rows.
+
+    Shared by fetch_sessions() and sessions_for_skill(): both need the same
+    per-message secret redaction (contains_secret()), MAX_MESSAGE_CHARS
+    truncation, and {role, content_preview, content_length} shape, and the
+    same user/assistant role counts. Returns (msg_summary, user_msgs, asst_msgs).
+    """
+    msg_summary = []
+    user_msgs = 0
+    asst_msgs = 0
+
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"] or ""
+        if contains_secret(content):
+            continue
+
+        if role == "user":
+            user_msgs += 1
+        elif role == "assistant":
+            asst_msgs += 1
+
+        if len(content) > MAX_MESSAGE_CHARS:
+            content = content[:MAX_MESSAGE_CHARS] + "\n[...truncated]"
+
+        msg_summary.append({
+            "role": role,
+            "content_preview": content[:500],
+            "content_length": len(content),
+        })
+
+    return msg_summary, user_msgs, asst_msgs
+
+
 def fetch_sessions(
     db_path: str = DEFAULT_DB_PATH,
     lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
@@ -110,37 +145,14 @@ def fetch_sessions(
         if ts < cutoff:
             continue
 
-        title = session.get("title", "")
-        model = session.get("model", "")
-        source = session.get("source", "")
-        total_tokens = session.get("total_tokens", 0)
+        title = session["title"] or ""
+        model = session["model"] or ""
+        source = session["source"] or ""
+        total_tokens = session["total_tokens"] or 0
 
         # Fetch messages
         messages = conn.execute(MESSAGE_QUERY, (session_id,)).fetchall()
-        msg_summary = []
-        user_msgs = 0
-        asst_msgs = 0
-        tool_calls = 0
-
-        for msg in messages:
-            role = msg["role"]
-            content = msg.get("content", "") or ""
-            if contains_secret(content):
-                continue
-
-            if role == "user":
-                user_msgs += 1
-            elif role == "assistant":
-                asst_msgs += 1
-
-            if len(content) > MAX_MESSAGE_CHARS:
-                content = content[:MAX_MESSAGE_CHARS] + "\n[...truncated]"
-
-            msg_summary.append({
-                "role": role,
-                "content_preview": content[:500],
-                "content_length": len(content),
-            })
+        msg_summary, user_msgs, asst_msgs = _summarize_messages(messages)
 
         results.append({
             "session_id": session_id,
@@ -225,29 +237,7 @@ def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH,
                 continue
 
             messages = conn.execute(SKILL_MESSAGE_QUERY, (session_id,)).fetchall()
-            msg_summary = []
-            user_msgs = 0
-            asst_msgs = 0
-
-            for msg in messages:
-                role = msg["role"]
-                content = msg["content"] or ""
-                if contains_secret(content):
-                    continue
-
-                if role == "user":
-                    user_msgs += 1
-                elif role == "assistant":
-                    asst_msgs += 1
-
-                if len(content) > MAX_MESSAGE_CHARS:
-                    content = content[:MAX_MESSAGE_CHARS] + "\n[...truncated]"
-
-                msg_summary.append({
-                    "role": role,
-                    "content_preview": content[:500],
-                    "content_length": len(content),
-                })
+            msg_summary, user_msgs, asst_msgs = _summarize_messages(messages)
 
             results.append({
                 "session_id": session["id"],
