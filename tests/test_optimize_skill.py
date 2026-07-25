@@ -369,6 +369,18 @@ def test_draft_proposal_from_gepa_result_rationale_reports_winner_and_runner_up(
     assert "0.65" in drafted.rationale  # runner-up score (second-highest, excluding winner)
 
 
+def test_draft_proposal_from_gepa_result_reports_seed_to_winner_delta():
+    """Covers R6: rationale reports the score delta from the seed candidate (gepa always
+    places it at val_aggregate_scores[0]) to the winner, e.g. "improved from 0.72 to 0.81"."""
+    result = _make_gepa_result(val_aggregate_scores=[0.72, 0.81, 0.65], best_idx=1)
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+    assert "0.72" in drafted.rationale  # seed score
+    assert "0.81" in drafted.rationale  # winner score
+    assert "improved" in drafted.rationale.lower()
+
+
 def test_draft_proposal_from_gepa_result_single_candidate_has_no_runner_up():
     """Edge case: only one candidate explored -- must not crash, and must note no runner-up."""
     result = _make_gepa_result(val_aggregate_scores=[0.7], best_idx=0)

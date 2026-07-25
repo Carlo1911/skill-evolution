@@ -244,6 +244,19 @@ def _winner_score(result) -> float:
     return result.val_aggregate_scores[result.best_idx]
 
 
+def _seed_score(result) -> float:
+    """Return the seed (pre-optimization) candidate's score.
+
+    gepa always places the seed candidate at index 0 of its internal candidate
+    list before any mutation runs (confirmed against gepa==0.1.4's
+    GEPAState.__init__: `program_candidates = [dict(seed_candidate)]`,
+    `parent_program_for_candidate = [[None]]`), and `val_aggregate_scores` is a
+    parallel array -- so val_aggregate_scores[0] is always the seed's own score,
+    with no extra evaluator call needed to establish a baseline.
+    """
+    return result.val_aggregate_scores[0]
+
+
 def draft_proposal_from_gepa_result(skill_name: str, result):
     """Construct an improve_existing SkillEvolutionProposal from a completed GEPA run.
 
@@ -257,16 +270,18 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     candidate frontier.
 
     The proposal's `body` change is the winning candidate text verbatim (result.best_candidate),
-    not a placeholder. The rationale reports how many candidates GEPA explored, the winning
-    candidate's score, and the runner-up's score (the second-highest score in
-    val_aggregate_scores, excluding the winner's own index) as a trade-off note (R9) -- unless
-    only one candidate was explored, in which case it says so instead of erroring.
+    not a placeholder. The rationale reports how many candidates GEPA explored, the
+    seed-to-winner score delta (R6: "score improved from 0.72 to 0.81"), and the
+    runner-up's score (the second-highest score in val_aggregate_scores, excluding the
+    winner's own index) as a trade-off note (R9) -- unless only one candidate was
+    explored, in which case it says so instead of erroring.
     """
     import proposal as proposal_module
 
     scores = list(result.val_aggregate_scores)
     num_candidates = len(scores)
     winner_score = _winner_score(result)
+    seed_score = _seed_score(result)
 
     other_scores = [s for i, s in enumerate(scores) if i != result.best_idx]
     if other_scores:
@@ -281,7 +296,8 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     rationale = (
         f"GEPA optimization explored {num_candidates} candidate"
         f"{'s' if num_candidates != 1 else ''} for skill '{skill_name}'. "
-        f"The winning candidate scored {winner_score:.3f}; {comparison}"
+        f"Score {'improved' if winner_score >= seed_score else 'changed'} from {seed_score:.3f} "
+        f"(seed) to {winner_score:.3f} (winner); {comparison}"
     )
     if getattr(result, "total_metric_calls", None) is not None:
         rationale += f" Total metric calls used: {result.total_metric_calls}."
@@ -334,7 +350,7 @@ def _run_skill(skill_name: str, iterations: Optional[int]) -> None:
     print(
         f"Optimizer proposal saved: {path} "
         f"({len(result.val_aggregate_scores)} candidates explored, "
-        f"winning score {_winner_score(result):.2f}, "
+        f"score improved from {_seed_score(result):.2f} to {_winner_score(result):.2f}, "
         f"{result.total_metric_calls} metric calls used)"
     )
 
