@@ -344,3 +344,102 @@ def test_require_gepa_missing_dependency_gives_clear_actionable_message(monkeypa
 def test_require_dspy_has_been_removed():
     """_require_dspy() is dead code now that U6 dropped the dspy extra -- U3 deletes it."""
     assert not hasattr(optimize_skill, "_require_dspy")
+
+
+# ── U4: draft_proposal_from_gepa_result() ────────────────────────────────
+#
+# Builds a real proposal from a completed run_gepa_optimization() result
+# (a GEPAResult, or a GEPAResult-shaped fake here since `gepa` isn't
+# installed), replacing the old placeholder-text drafting path for the
+# new GEPA-backed flow. draft_proposal_for_target() above is untouched --
+# it's still used by the old dspy-based run_optimizer(), which is out of
+# scope for this unit (U5's job).
+
+
+def _make_gepa_result(best_candidate="optimized skill body text",
+                       val_aggregate_scores=(0.5, 0.8, 0.65),
+                       best_idx=1,
+                       total_metric_calls=15):
+    return types.SimpleNamespace(
+        best_candidate=best_candidate,
+        val_aggregate_scores=list(val_aggregate_scores),
+        best_idx=best_idx,
+        total_metric_calls=total_metric_calls,
+    )
+
+
+def test_draft_proposal_from_gepa_result_uses_optimized_candidate_not_placeholder():
+    result = _make_gepa_result(best_candidate="This is the real optimized candidate body.")
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+    assert drafted.target_skill == "my-skill"
+    assert drafted.type == proposal_module.ProposalType.IMPROVE_EXISTING
+    assert len(drafted.proposed_changes) == 1
+    assert drafted.proposed_changes[0].field == "body"
+    assert drafted.proposed_changes[0].new_value == "This is the real optimized candidate body."
+    # Must not be the old placeholder shape.
+    assert "Address this feedback and revise" not in drafted.proposed_changes[0].new_value
+
+
+def test_draft_proposal_from_gepa_result_rationale_reports_winner_and_runner_up():
+    """Covers R9: rationale names candidate count and distinguishes winner from runner-up."""
+    result = _make_gepa_result(val_aggregate_scores=[0.5, 0.8, 0.65], best_idx=1)
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+    assert "3" in drafted.rationale  # number of candidates explored
+    assert "0.8" in drafted.rationale  # winning score
+    assert "0.65" in drafted.rationale  # runner-up score (second-highest, excluding winner)
+
+
+def test_draft_proposal_from_gepa_result_single_candidate_has_no_runner_up():
+    """Edge case: only one candidate explored -- must not crash, and must note no runner-up."""
+    result = _make_gepa_result(val_aggregate_scores=[0.7], best_idx=0)
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result("solo-skill", result)
+
+    assert "0.7" in drafted.rationale
+    assert "runner-up" in drafted.rationale.lower()
+    assert "no runner-up" in drafted.rationale.lower() or "no-runner-up" in drafted.rationale.lower()
+
+
+def test_draft_proposal_from_gepa_result_goes_through_same_gate_no_bypass(isolated_dirs, monkeypatch):
+    """Regression, covers AE3: a GEPA-drafted proposal is gated identically to any other --
+    no special-cased auto-apply path just because it came from the optimizer."""
+    result = _make_gepa_result(best_candidate="candidate body", val_aggregate_scores=[0.4, 0.9], best_idx=1)
+    drafted = optimize_skill.draft_proposal_from_gepa_result("weak-skill", result)
+    path = proposal_module.save_proposal(drafted, directory=isolated_dirs["proposals_dir"])
+    saved = proposal_module.load_proposal(path)
+
+    monkeypatch.setattr(
+        evaluate, "run_evaluators",
+        lambda content, target, context=None: [
+            EvalResult(score=0.1, passed=False, feedback="still bad", evaluator_name="stub"),
+        ],
+    )
+
+    result_dict = proposal_module.apply_proposal(saved, min_confidence=0.0, directory=isolated_dirs["proposals_dir"])
+
+    assert result_dict["can_apply"] is False
+    assert saved.status == proposal_module.ProposalStatus.PROPOSED
+
+
+def test_draft_proposal_from_gepa_result_can_apply_when_gate_passes(isolated_dirs, monkeypatch):
+    """Flip side: no bypass in either direction -- passes for the same reason any proposal would."""
+    result = _make_gepa_result(best_candidate="candidate body", val_aggregate_scores=[0.4, 0.9], best_idx=1)
+    drafted = optimize_skill.draft_proposal_from_gepa_result("weak-skill", result)
+    path = proposal_module.save_proposal(drafted, directory=isolated_dirs["proposals_dir"])
+    saved = proposal_module.load_proposal(path)
+
+    monkeypatch.setattr(
+        evaluate, "run_evaluators",
+        lambda content, target, context=None: [
+            EvalResult(score=1.0, passed=True, feedback="better now", evaluator_name="stub"),
+        ],
+    )
+
+    result_dict = proposal_module.apply_proposal(saved, min_confidence=0.0, directory=isolated_dirs["proposals_dir"])
+
+    assert result_dict["can_apply"] is True
+    assert saved.status == proposal_module.ProposalStatus.APPLIED

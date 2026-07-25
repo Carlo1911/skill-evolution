@@ -243,6 +243,62 @@ def draft_proposal_for_target(entry: Dict[str, Any]):
     )
 
 
+def draft_proposal_from_gepa_result(skill_name: str, result):
+    """Construct an improve_existing SkillEvolutionProposal from a completed GEPA run.
+
+    `result` must be a real gepa.GEPAResult (or a GEPAResult-shaped object) exposing
+    `.best_candidate`, `.val_aggregate_scores`, `.best_idx`, and `.total_metric_calls` --
+    i.e. what run_gepa_optimization() returns when it actually ran the optimizer.
+
+    Caller must check for NotEnoughHistoryResult (e.g. `isinstance(result,
+    NotEnoughHistoryResult)` or `result.status == "not_enough_history"`) BEFORE calling
+    this function -- it does not handle that case and assumes `result` carries a real
+    candidate frontier.
+
+    The proposal's `body` change is the winning candidate text verbatim (result.best_candidate),
+    not a placeholder. The rationale reports how many candidates GEPA explored, the winning
+    candidate's score, and the runner-up's score (the second-highest score in
+    val_aggregate_scores, excluding the winner's own index) as a trade-off note (R9) -- unless
+    only one candidate was explored, in which case it says so instead of erroring.
+    """
+    import proposal as proposal_module
+
+    scores = list(result.val_aggregate_scores)
+    num_candidates = len(scores)
+    winner_score = scores[result.best_idx]
+
+    other_scores = [s for i, s in enumerate(scores) if i != result.best_idx]
+    if other_scores:
+        runner_up_score = max(other_scores)
+        comparison = (
+            f"the runner-up candidate scored {runner_up_score:.3f} "
+            f"(a {winner_score - runner_up_score:+.3f} margin over the winner)."
+        )
+    else:
+        comparison = "no runner-up exists -- only one candidate was explored."
+
+    rationale = (
+        f"GEPA optimization explored {num_candidates} candidate"
+        f"{'s' if num_candidates != 1 else ''} for skill '{skill_name}'. "
+        f"The winning candidate scored {winner_score:.3f}; {comparison}"
+    )
+    if getattr(result, "total_metric_calls", None) is not None:
+        rationale += f" Total metric calls used: {result.total_metric_calls}."
+
+    return proposal_module.SkillEvolutionProposal(
+        type=proposal_module.ProposalType.IMPROVE_EXISTING,
+        target_skill=skill_name,
+        confidence=0.5,  # the evaluation gate, not this confidence, is the real check
+        summary=f"GEPA-optimized improvement for {skill_name}",
+        rationale=rationale,
+        proposed_changes=[proposal_module.ProposedChange(
+            field="body",
+            description="GEPA-optimized skill body, selected from the explored candidate frontier.",
+            new_value=result.best_candidate,
+        )],
+    )
+
+
 def run_optimizer(history_path: Optional[str] = None, proposals_dir: Optional[str] = None) -> List[str]:
     """Draft and save proposals for every low-scoring target.
 
