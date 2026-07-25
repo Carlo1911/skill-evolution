@@ -167,6 +167,97 @@ def fetch_sessions(
     return results
 
 
+SKILL_SESSION_IDS_QUERY = """
+    SELECT DISTINCT m.session_id AS session_id
+    FROM messages m, json_each(m.tool_calls) AS tc
+    WHERE m.tool_calls IS NOT NULL
+      AND json_valid(m.tool_calls)
+      AND json_extract(tc.value, '$.function.name') IN ('skill_view', 'skill_manage')
+      AND json_valid(json_extract(tc.value, '$.function.arguments'))
+      AND json_extract(json_extract(tc.value, '$.function.arguments'), '$.name') = ?
+"""
+
+SKILL_SESSION_QUERY = """
+    SELECT id, started_at, model, title, source
+    FROM sessions
+    WHERE id = ? AND source != 'cron'
+"""
+
+SKILL_MESSAGE_QUERY = """
+    SELECT role, content, timestamp
+    FROM messages
+    WHERE session_id = ?
+    ORDER BY id ASC
+"""
+
+
+def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
+    """Return a skill's full recorded session history.
+
+    Unlike fetch_sessions(), this is not gated by the cron pipeline's
+    processed-state or lookback window, and has no side effects (it never
+    calls mark_processed() or touches the state file). A session is matched
+    when one of its messages recorded a `skill_view` or `skill_manage` tool
+    call whose arguments name this skill.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        session_ids = [
+            row["session_id"]
+            for row in conn.execute(SKILL_SESSION_IDS_QUERY, (skill_name,)).fetchall()
+        ]
+
+        results = []
+        for session_id in session_ids:
+            session = conn.execute(SKILL_SESSION_QUERY, (session_id,)).fetchone()
+            if session is None:
+                # Either the session doesn't exist or it's source='cron'.
+                continue
+
+            messages = conn.execute(SKILL_MESSAGE_QUERY, (session_id,)).fetchall()
+            msg_summary = []
+            user_msgs = 0
+            asst_msgs = 0
+
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"] or ""
+                if contains_secret(content):
+                    continue
+
+                if role == "user":
+                    user_msgs += 1
+                elif role == "assistant":
+                    asst_msgs += 1
+
+                if len(content) > MAX_MESSAGE_CHARS:
+                    content = content[:MAX_MESSAGE_CHARS] + "\n[...truncated]"
+
+                msg_summary.append({
+                    "role": role,
+                    "content_preview": content[:500],
+                    "content_length": len(content),
+                })
+
+            results.append({
+                "session_id": session["id"],
+                "started_at": session["started_at"],
+                "title": session["title"],
+                "model": session["model"],
+                "source": session["source"],
+                "message_count": len(messages),
+                "user_messages": user_msgs,
+                "assistant_messages": asst_msgs,
+                "messages": msg_summary,
+            })
+
+        return results
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch unprocessed Hermes sessions")
     parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
