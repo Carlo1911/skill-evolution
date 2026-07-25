@@ -443,3 +443,161 @@ def test_draft_proposal_from_gepa_result_can_apply_when_gate_passes(isolated_dir
 
     assert result_dict["can_apply"] is True
     assert saved.status == proposal_module.ProposalStatus.APPLIED
+
+
+# ── U5: CLI surface -- explicit invocation + candidates report ───────────
+#
+# Replaces the old auto-scan-and-run main() with --skill/--iterations
+# explicit invocation and a --list-candidates read-only report. These tests
+# exercise main() directly via monkeypatched sys.argv, following the same
+# pattern as test_disabled_by_default_exits_early above.
+
+
+def test_list_candidates_prints_targets_and_writes_no_proposal(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--list-candidates"])
+
+    fake_targets = [
+        {"target": "skill:weak-skill", "score": 0.3, "feedback": "Too verbose and unclear."},
+    ]
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda: fake_targets)
+
+    save_called = []
+    monkeypatch.setattr(
+        "proposal.save_proposal",
+        lambda *a, **kw: save_called.append(True) or "should-not-be-called",
+        raising=False,
+    )
+
+    optimize_skill.main()
+
+    captured = capsys.readouterr()
+    assert "weak-skill" in captured.out
+    assert "0.3" in captured.out
+    assert "Too verbose and unclear." in captured.out
+    assert save_called == []
+
+
+def test_list_candidates_with_no_targets_prints_clear_message(monkeypatch, capsys):
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--list-candidates"])
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda: [])
+
+    optimize_skill.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() != ""
+
+
+def test_skill_flag_runs_full_flow_and_prints_saved_path(monkeypatch, capsys, isolated_dirs):
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--skill", "my-skill", "--iterations", "7"])
+
+    captured_args = {}
+
+    def fake_run_gepa_optimization(skill_name, iterations=None):
+        captured_args["skill_name"] = skill_name
+        captured_args["iterations"] = iterations
+        return types.SimpleNamespace(
+            best_candidate="improved body",
+            val_aggregate_scores=[0.5, 0.9],
+            best_idx=1,
+            total_metric_calls=12,
+        )
+
+    monkeypatch.setattr(optimize_skill, "run_gepa_optimization", fake_run_gepa_optimization)
+    monkeypatch.setattr(
+        proposal_module, "get_proposals_dir", lambda: isolated_dirs["proposals_dir"]
+    )
+
+    optimize_skill.main()
+
+    captured = capsys.readouterr()
+    assert captured_args == {"skill_name": "my-skill", "iterations": 7}
+    assert "saved" in captured.out.lower()
+    assert "12" in captured.out  # metric calls used
+    assert "0.9" in captured.out  # winning score
+
+    # Confirm a real proposal file was written to the isolated proposals dir.
+    saved_files = list(os.listdir(isolated_dirs["proposals_dir"]))
+    assert len(saved_files) == 1
+
+
+def test_skill_flag_without_iterations_defaults_to_none(monkeypatch, capsys, isolated_dirs):
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--skill", "my-skill"])
+
+    captured_args = {}
+
+    def fake_run_gepa_optimization(skill_name, iterations=None):
+        captured_args["skill_name"] = skill_name
+        captured_args["iterations"] = iterations
+        return types.SimpleNamespace(
+            best_candidate="improved body",
+            val_aggregate_scores=[0.9],
+            best_idx=0,
+            total_metric_calls=3,
+        )
+
+    monkeypatch.setattr(optimize_skill, "run_gepa_optimization", fake_run_gepa_optimization)
+    monkeypatch.setattr(
+        proposal_module, "get_proposals_dir", lambda: isolated_dirs["proposals_dir"]
+    )
+
+    optimize_skill.main()
+
+    assert captured_args == {"skill_name": "my-skill", "iterations": None}
+
+
+def test_no_flags_prints_usage_message_not_auto_scan(monkeypatch, capsys):
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py"])
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("no auto-scan-all run should happen when neither flag is given")
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", fail_if_called)
+    monkeypatch.setattr(optimize_skill, "run_gepa_optimization", fail_if_called)
+
+    optimize_skill.main()
+
+    captured = capsys.readouterr()
+    assert "--skill" in (captured.out + captured.err)
+    assert "--list-candidates" in (captured.out + captured.err)
+
+
+def test_skill_flag_not_enough_history_prints_message_and_no_proposal(monkeypatch, capsys, isolated_dirs):
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--skill", "new-skill"])
+
+    monkeypatch.setattr(
+        optimize_skill, "run_gepa_optimization",
+        lambda skill_name, iterations=None: optimize_skill.NotEnoughHistoryResult(
+            status="not_enough_history", skill_name=skill_name, session_count=1,
+        ),
+    )
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("draft_proposal_from_gepa_result must not be called for NotEnoughHistoryResult")
+    monkeypatch.setattr(optimize_skill, "draft_proposal_from_gepa_result", fail_if_called)
+
+    optimize_skill.main()
+
+    captured = capsys.readouterr()
+    combined = (captured.out + captured.err).lower()
+    assert "not enough" in combined or "history" in combined
+    assert list(os.listdir(isolated_dirs["proposals_dir"])) == []
+
+
+def test_disabled_optimizer_ignores_skill_and_list_candidates_flags(monkeypatch, capsys):
+    """Regression: SKILL_EVOLUTION_OPTIMIZER_ENABLED unset/false exits before touching either mode."""
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--skill", "anything", "--list-candidates"])
+
+    def fail_if_called(*a, **kw):
+        raise AssertionError("neither mode should run while the optimizer is disabled")
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", fail_if_called)
+    monkeypatch.setattr(optimize_skill, "run_gepa_optimization", fail_if_called)
+
+    optimize_skill.main()
+
+    captured = capsys.readouterr()
+    assert "disabled" in captured.err.lower()

@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Optional GEPA-lite optimizer: reads the evaluation history for low-scoring
-targets and drafts skill-improvement proposals through the normal
-proposal/gate path.
+"""Optional GEPA-lite optimizer: runs a GEPA optimization pass over one
+installed skill's body against its own recorded session history, and drafts
+a skill-improvement proposal through the normal proposal/gate path.
 
-Gated behind SKILL_EVOLUTION_OPTIMIZER_ENABLED=true. The optional `dspy`
-dependency is only required when enabled (install with
-`pip install -e ".[optimizer]"`); the rest of the pipeline works with it
+Gated behind SKILL_EVOLUTION_OPTIMIZER_ENABLED=true. The optional `gepa`
+dependency is only required when actually running an optimization (install
+with `pip install -e ".[optimizer]"`); the rest of the pipeline works with it
 absent.
 
 Usage:
-    SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py
+    # Read-only report of low-scoring targets from evaluation history.
+    SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py --list-candidates
+
+    # Run GEPA optimization for one skill and save the resulting proposal.
+    SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py --skill <name> [--iterations N]
 """
 
+import argparse
 import functools
 import os
 import secrets
@@ -221,28 +226,6 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     )
 
 
-def draft_proposal_for_target(entry: Dict[str, Any]):
-    """Construct a normal improve_existing SkillEvolutionProposal from a low-scoring entry."""
-    import proposal as proposal_module
-
-    target = entry.get("target", "")
-    skill_name = target.split(":", 1)[1] if target.startswith("skill:") else target
-    feedback = entry.get("feedback", "")
-
-    return proposal_module.SkillEvolutionProposal(
-        type=proposal_module.ProposalType.IMPROVE_EXISTING,
-        target_skill=skill_name,
-        confidence=0.5,  # the evaluation gate, not this confidence, is the real check
-        summary=f"Optimizer-proposed improvement for {skill_name}",
-        rationale=f"Low score ({entry.get('score')}) with feedback: {feedback}",
-        proposed_changes=[proposal_module.ProposedChange(
-            field="body",
-            description="Address the evaluator feedback below.",
-            new_value=f"Address this feedback and revise: {feedback}",
-        )],
-    )
-
-
 def draft_proposal_from_gepa_result(skill_name: str, result):
     """Construct an improve_existing SkillEvolutionProposal from a completed GEPA run.
 
@@ -299,22 +282,44 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     )
 
 
-def run_optimizer(history_path: Optional[str] = None, proposals_dir: Optional[str] = None) -> List[str]:
-    """Draft and save proposals for every low-scoring target.
+def _print_candidates(targets: List[Dict[str, Any]]) -> None:
+    """Print find_low_scoring_targets()'s entries as a read-only report (R11)."""
+    if not targets:
+        print("No low-scoring targets found.")
+        return
 
-    Only saves proposals (status: proposed) via the normal save_proposal() path
-    -- it never calls apply_proposal() itself, so optimizer-originated
-    proposals go through the exact same evaluation gate as any other
-    proposal, with no auto-apply bypass.
-    """
-    _require_dspy()
+    for entry in targets:
+        target = entry.get("target", "")
+        score = entry.get("score")
+        feedback = entry.get("feedback", "")
+        print(f"{target}\tscore={score}\t{feedback}")
+
+
+def _run_skill(skill_name: str, iterations: Optional[int]) -> None:
+    """Run U3+U4's flow for exactly one skill and print the outcome."""
     import proposal as proposal_module
 
-    saved_paths = []
-    for entry in find_low_scoring_targets(history_path=history_path):
-        drafted = draft_proposal_for_target(entry)
-        saved_paths.append(proposal_module.save_proposal(drafted, directory=proposals_dir))
-    return saved_paths
+    result = run_gepa_optimization(skill_name, iterations)
+
+    if isinstance(result, NotEnoughHistoryResult):
+        print(
+            f"Not enough session history for skill '{skill_name}' "
+            f"({result.session_count} session(s) recorded, {MIN_SESSIONS} required); "
+            "skipping optimization, no proposal written.",
+            file=sys.stderr,
+        )
+        return
+
+    drafted = draft_proposal_from_gepa_result(skill_name, result)
+    path = proposal_module.save_proposal(drafted)
+
+    scores = list(result.val_aggregate_scores)
+    winner_score = scores[result.best_idx]
+    print(
+        f"Optimizer proposal saved: {path} "
+        f"({len(scores)} candidates explored, winning score {winner_score:.2f}, "
+        f"{result.total_metric_calls} metric calls used)"
+    )
 
 
 def main():
@@ -325,14 +330,32 @@ def main():
         )
         return
 
-    try:
-        saved_paths = run_optimizer()
-    except RuntimeError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="GEPA-lite skill optimizer")
+    parser.add_argument("--skill", help="Run GEPA optimization for this installed skill by name")
+    parser.add_argument("--iterations", type=int, default=None, help="Override the metric-call budget")
+    parser.add_argument(
+        "--list-candidates", action="store_true",
+        help="Print low-scoring targets from evaluation history and exit (read-only, no optimization run)",
+    )
+    args = parser.parse_args()
 
-    for path in saved_paths:
-        print(f"Optimizer proposal saved: {path}")
+    if args.list_candidates:
+        _print_candidates(find_low_scoring_targets())
+        return
+
+    if args.skill:
+        try:
+            _run_skill(args.skill, args.iterations)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        return
+
+    parser.print_usage(sys.stderr)
+    print(
+        "Specify either --skill <name> (optionally with --iterations) or --list-candidates.",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
