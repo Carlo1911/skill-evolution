@@ -12,30 +12,35 @@ Usage:
     SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py
 """
 
+import functools
 import os
 import secrets
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 OPTIMIZER_ENABLED_ENV_VAR = "SKILL_EVOLUTION_OPTIMIZER_ENABLED"
 DEFAULT_LOW_SCORE_THRESHOLD = 0.6
 GEPA_EVALUATOR_NAME = "gepa_evaluator"
 
+# ── Core GEPA optimization run (U3) ─────────────────────────────────────
+MIN_SESSIONS = 3
+DEFAULT_MAX_METRIC_CALLS = 20
+
+
+class NotEnoughHistoryResult(NamedTuple):
+    """Returned by run_gepa_optimization() instead of a gepa.GEPAResult when a skill
+    has fewer than MIN_SESSIONS recorded sessions. gepa is never imported or called
+    in this case (R4). `status` is always the literal string "not_enough_history" --
+    callers (U4/U5) can distinguish this from a real result either by that field or
+    by `isinstance(result, NotEnoughHistoryResult)`.
+    """
+    status: str
+    skill_name: str
+    session_count: int
+
 
 def is_enabled() -> bool:
     return os.environ.get(OPTIMIZER_ENABLED_ENV_VAR, "false").strip().lower() == "true"
-
-
-def _require_dspy():
-    """Import the optional `dspy` dependency, raising a clear, actionable error if absent."""
-    try:
-        import dspy
-        return dspy
-    except ImportError as e:
-        raise RuntimeError(
-            "The optional optimizer dependency 'dspy' is not installed. "
-            "Install it with: pip install -e '.[optimizer]'"
-        ) from e
 
 
 def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
@@ -133,6 +138,87 @@ def score_candidate(candidate: str, sessions: List[Dict[str, Any]],
 
     avg_score = sum(float(parsed[k]) for k in judge.RUBRIC_KEYS) / len(judge.RUBRIC_KEYS)
     return avg_score, {"feedback": parsed.get("feedback", "")}
+
+
+def _require_gepa():
+    """Import the optional `gepa` dependency, raising a clear, actionable error if absent."""
+    try:
+        import gepa
+        return gepa
+    except ImportError as e:
+        raise RuntimeError(
+            "The optional optimizer dependency 'gepa' is not installed. "
+            "Install it with: pip install -e '.[optimizer]'"
+        ) from e
+
+
+def _reflection_lm_adapter(prompt):
+    """LanguageModel-protocol callable: (str | list[dict]) -> str.
+
+    Passed as config.reflection.reflection_lm so gepa's reflective-mutation step (the
+    LLM that proposes each new candidate) routes through this repo's
+    evaluate.call_provider() -- and its redaction/provider-resolution posture -- instead
+    of falling through to gepa's own litellm-based default (which isn't installed here).
+    """
+    import evaluate
+
+    if isinstance(prompt, list):
+        prompt = "\n\n".join(m.get("content", "") for m in prompt if isinstance(m, dict))
+    return evaluate.call_provider(prompt, evaluator_name="gepa_reflection")
+
+
+def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
+    """Run one GEPA optimization pass over an installed skill's body against its own
+    recorded session history.
+
+    Resolves `skill_name` to its installed SKILL.md via skill_index.scan_skills() and
+    reads that file's text as the seed candidate, then fetches the skill's full session
+    history via fetch_sessions.sessions_for_skill() (U1). If fewer than MIN_SESSIONS
+    sessions are on record, returns a NotEnoughHistoryResult without importing or
+    calling gepa at all (R4).
+
+    Otherwise runs gepa.optimize_anything() in Single-Task Search mode (no dataset/valset
+    -- the seed candidate string is the one thing being optimized), scored by
+    score_candidate() (U2, bound to this skill's sessions via functools.partial), with
+    the reflective-mutation LLM routed through _reflection_lm_adapter() /
+    evaluate.call_provider() rather than gepa's own default.
+
+    Returns the raw gepa.GEPAResult (exposing at least .best_candidate,
+    .val_aggregate_scores, .best_idx, .total_metric_calls) on completion. Raises
+    ValueError if no installed skill matches `skill_name`.
+    """
+    import fetch_sessions
+    import skill_index
+
+    matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
+    if not matches:
+        raise ValueError(f"No installed skill found matching name '{skill_name}'")
+    with open(matches[0]["path"]) as f:
+        seed_body = f.read()
+
+    sessions = fetch_sessions.sessions_for_skill(skill_name)
+    if len(sessions) < MIN_SESSIONS:
+        return NotEnoughHistoryResult(
+            status="not_enough_history",
+            skill_name=skill_name,
+            session_count=len(sessions),
+        )
+
+    gepa = _require_gepa()
+    bound_evaluator = functools.partial(score_candidate, sessions=sessions)
+    config = gepa.GEPAConfig(
+        engine=gepa.EngineConfig(max_metric_calls=iterations or DEFAULT_MAX_METRIC_CALLS),
+        reflection=gepa.ReflectionConfig(reflection_lm=_reflection_lm_adapter),
+    )
+    return gepa.optimize_anything(
+        seed_candidate=seed_body,
+        evaluator=bound_evaluator,
+        objective=(
+            "Improve this Hermes Agent skill's instructions based on how it performed "
+            "in real recorded sessions."
+        ),
+        config=config,
+    )
 
 
 def draft_proposal_for_target(entry: Dict[str, Any]):
