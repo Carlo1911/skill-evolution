@@ -15,11 +15,8 @@ keywords = ["hermes", "agent", "skills", "evolution", "self-improvement"]
 dev = [
     "pytest>=7.0",
 ]
-dspy = [
-    "dspy>=3.0.0",
-]
 optimizer = [
-    "dspy>=3.0.0",
+    "gepa==0.1.4",
 ]
 
 [tool.setuptools.packages.find]
