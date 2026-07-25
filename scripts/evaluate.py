@@ -410,16 +410,26 @@ class LLMJudgeEvaluator(Evaluator):
         prompt = self._build_prompt(content)
         try:
             raw_response = call_provider(prompt, evaluator_name=self.name)
-            parsed = self._parse_response(raw_response)
+            avg_score, parsed = self.parse_and_score(raw_response)
         except (ProviderError, ValueError) as e:
             return self._fail(f"llm_judge failed closed: {e}")
 
-        avg_score = sum(float(parsed[k]) for k in self.RUBRIC_KEYS) / len(self.RUBRIC_KEYS)
         threshold = float(os.environ.get(LLM_JUDGE_THRESHOLD_ENV_VAR, DEFAULT_LLM_JUDGE_THRESHOLD))
         return EvalResult(
             score=avg_score, passed=avg_score >= threshold, evaluator_name=self.name,
             feedback=parsed.get("feedback", ""),
         )
+
+    def parse_and_score(self, raw: str) -> Tuple[float, Dict[str, Any]]:
+        """Validate a raw judge response and average its rubric keys into one score.
+
+        Public so other rubric-shaped judges (e.g. optimize_skill.py's GEPA evaluator)
+        can reuse the same parsing strictness and averaging formula instead of
+        reimplementing them against this class's private _parse_response().
+        """
+        parsed = self._parse_response(raw)
+        avg_score = sum(float(parsed[k]) for k in self.RUBRIC_KEYS) / len(self.RUBRIC_KEYS)
+        return avg_score, parsed
 
     def _build_prompt(self, content: str) -> str:
         # A per-call random boundary (rather than a static tag name) means evaluated

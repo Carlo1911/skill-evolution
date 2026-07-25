@@ -137,11 +137,10 @@ def score_candidate(candidate: str, sessions: List[Dict[str, Any]],
     judge = evaluate.LLMJudgeEvaluator()
     try:
         raw_response = evaluate.call_provider(prompt, evaluator_name=evaluator_name)
-        parsed = judge._parse_response(raw_response)
+        avg_score, parsed = judge.parse_and_score(raw_response)
     except (evaluate.ProviderError, ValueError) as e:
         return 0.0, {"feedback": f"gepa evaluator failed closed: {e}"}
 
-    avg_score = sum(float(parsed[k]) for k in judge.RUBRIC_KEYS) / len(judge.RUBRIC_KEYS)
     return avg_score, {"feedback": parsed.get("feedback", "")}
 
 
@@ -157,6 +156,9 @@ def _require_gepa():
         ) from e
 
 
+GEPA_REFLECTION_EVALUATOR_NAME = "gepa_reflection"
+
+
 def _reflection_lm_adapter(prompt):
     """LanguageModel-protocol callable: (str | list[dict]) -> str.
 
@@ -169,7 +171,7 @@ def _reflection_lm_adapter(prompt):
 
     if isinstance(prompt, list):
         prompt = "\n\n".join(m.get("content", "") for m in prompt if isinstance(m, dict))
-    return evaluate.call_provider(prompt, evaluator_name="gepa_reflection")
+    return evaluate.call_provider(prompt, evaluator_name=GEPA_REFLECTION_EVALUATOR_NAME)
 
 
 def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
@@ -226,6 +228,11 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     )
 
 
+def _winner_score(result) -> float:
+    """Return the winning candidate's score from a gepa.GEPAResult-shaped object."""
+    return result.val_aggregate_scores[result.best_idx]
+
+
 def draft_proposal_from_gepa_result(skill_name: str, result):
     """Construct an improve_existing SkillEvolutionProposal from a completed GEPA run.
 
@@ -248,7 +255,7 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
 
     scores = list(result.val_aggregate_scores)
     num_candidates = len(scores)
-    winner_score = scores[result.best_idx]
+    winner_score = _winner_score(result)
 
     other_scores = [s for i, s in enumerate(scores) if i != result.best_idx]
     if other_scores:
@@ -313,11 +320,10 @@ def _run_skill(skill_name: str, iterations: Optional[int]) -> None:
     drafted = draft_proposal_from_gepa_result(skill_name, result)
     path = proposal_module.save_proposal(drafted)
 
-    scores = list(result.val_aggregate_scores)
-    winner_score = scores[result.best_idx]
     print(
         f"Optimizer proposal saved: {path} "
-        f"({len(scores)} candidates explored, winning score {winner_score:.2f}, "
+        f"({len(result.val_aggregate_scores)} candidates explored, "
+        f"winning score {_winner_score(result):.2f}, "
         f"{result.total_metric_calls} metric calls used)"
     )
 

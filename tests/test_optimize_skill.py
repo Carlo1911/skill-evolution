@@ -55,32 +55,6 @@ def test_disabled_optimizer_never_touches_dspy_or_history(monkeypatch, capsys):
     assert "disabled" in captured.err.lower()
 
 
-# NOTE: The following legacy tests (once here) were migrated/removed as part of U7:
-#
-# - test_missing_optional_dependency_gives_clear_actionable_message: re-targeted at
-#   run_gepa_optimization()/_require_gepa(); see below, next to
-#   test_require_gepa_missing_dependency_gives_clear_actionable_message.
-# - test_low_scoring_target_produces_saved_proposal: re-targeted at the
-#   run_gepa_optimization() + draft_proposal_from_gepa_result() + save_proposal() flow;
-#   see test_gepa_flow_produces_saved_proposal_for_target_skill below, in the U4 section.
-# - test_high_scoring_target_produces_no_proposal: DELETED. It exercised the old
-#   auto-scan model's "skip if score is high enough" gate, which U5 removed entirely --
-#   --skill now runs unconditionally for whatever skill is named, regardless of its
-#   current recorded score (skill selection is the user's job, not the optimizer's).
-#   --list-candidates is the new discovery surface, and it is a pure read-only report
-#   over find_low_scoring_targets() with no "produces no proposal" side effect to assert
-#   in the first place. There is no genuinely equivalent assertion left to migrate this
-#   test onto.
-# - test_optimizer_proposal_goes_through_same_gate_no_bypass: TRUE DUPLICATE of U4's
-#   test_draft_proposal_from_gepa_result_goes_through_same_gate_no_bypass (same
-#   assertion -- forced gate failure -> can_apply is False, status stays PROPOSED --
-#   already re-targeted at the new draft_proposal_from_gepa_result() path). Removed in
-#   favor of the surviving U4 version.
-# - test_optimizer_proposal_can_apply_when_gate_passes_like_any_proposal: TRUE DUPLICATE
-#   of U4's test_draft_proposal_from_gepa_result_can_apply_when_gate_passes. Removed in
-#   favor of the surviving U4 version.
-
-
 # ── U3: run_gepa_optimization() ─────────────────────────────────────────
 #
 # These tests exercise the core GEPA optimization run (U3). The real `gepa`
@@ -256,7 +230,7 @@ def test_reflection_lm_routes_through_call_provider(tmp_path, monkeypatch):
 
     assert output == "reflected text"
     assert captured_calls[0][0] == "propose a better version"
-    assert captured_calls[0][1] == "gepa_reflection"
+    assert captured_calls[0][1] == optimize_skill.GEPA_REFLECTION_EVALUATOR_NAME
 
 
 def test_unknown_skill_raises_value_error(monkeypatch):
@@ -286,12 +260,8 @@ def test_require_dspy_has_been_removed():
 
 
 def test_run_gepa_optimization_missing_optional_dependency_gives_clear_actionable_message(tmp_path, monkeypatch):
-    """Migrated from the old dspy-based test_missing_optional_dependency_gives_clear_actionable_message
-    (U7): the old auto-scan entry point this test used to call was removed by U5. The
-    equivalent behavior now lives in run_gepa_optimization(), which calls _require_gepa()
-    only once enough session history is on record. Uses fixture session history to reach
-    that call, then confirms the RuntimeError from _require_gepa() propagates through
-    run_gepa_optimization() unchanged."""
+    """run_gepa_optimization() calls _require_gepa() once enough session history is on
+    record; confirm its RuntimeError propagates through unchanged."""
     skill_md_path = _make_fake_skill(tmp_path, name="my-skill")
     monkeypatch.setattr(skill_index, "scan_skills", lambda: [
         {"name": "my-skill", "category": "cat", "description": "test", "path": skill_md_path, "size": 10},
@@ -409,13 +379,11 @@ def test_draft_proposal_from_gepa_result_can_apply_when_gate_passes(isolated_dir
 
 
 def test_gepa_flow_produces_saved_proposal_for_target_skill(tmp_path, isolated_dirs, monkeypatch):
-    """Migrated from the old dspy-based test_low_scoring_target_produces_saved_proposal (U7):
-    exercises the full new explicit-invocation pipeline end to end -- run_gepa_optimization()
-    (with a stubbed `gepa` module and fixture session history) feeding
-    draft_proposal_from_gepa_result() feeding proposal_module.save_proposal() -- and confirms
-    the proposal actually written to disk has target_skill matching and status PROPOSED. This
-    fills a gap the CLI test (test_skill_flag_runs_full_flow_and_prints_saved_path) doesn't
-    cover: that test checks a file was written, but never loads and inspects it."""
+    """Exercises the full pipeline end to end -- run_gepa_optimization() (stubbed `gepa`
+    module, fixture session history) feeding draft_proposal_from_gepa_result() feeding
+    proposal_module.save_proposal() -- and confirms the proposal written to disk has
+    target_skill matching and status PROPOSED. Unlike test_skill_flag_runs_full_flow_and_prints_saved_path
+    (which only checks a file was written), this loads and inspects it."""
     skill_md_path = _make_fake_skill(tmp_path, name="weak-skill")
     monkeypatch.setattr(skill_index, "scan_skills", lambda: [
         {"name": "weak-skill", "category": "cat", "description": "test", "path": skill_md_path, "size": 10},
