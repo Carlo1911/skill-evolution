@@ -31,6 +31,23 @@ GEPA_EVALUATOR_NAME = "gepa_evaluator"
 MIN_SESSIONS = 3
 DEFAULT_MAX_METRIC_CALLS = 20
 
+# ── U4: env-var overrides for the above, following evaluate.py's
+# SKILL_EVOLUTION_<NOUN> convention (an OPTIMIZER_ segment distinguishes
+# these optimizer-only tunables from the shared evaluation-gate ones). Each
+# is resolved from its env var at the point of use, not baked into a
+# function's default-argument value -- see _resolve_min_sessions() and
+# run_gepa_optimization()'s max_metric_calls resolution below.
+MIN_SESSIONS_ENV_VAR = "SKILL_EVOLUTION_OPTIMIZER_MIN_SESSIONS"
+MAX_METRIC_CALLS_ENV_VAR = "SKILL_EVOLUTION_OPTIMIZER_MAX_METRIC_CALLS"
+
+
+def _resolve_min_sessions() -> int:
+    """Resolve the not-enough-history threshold from its env var, falling back to
+    MIN_SESSIONS. Shared by run_gepa_optimization() (the actual gate) and
+    _run_skill() (which prints the resolved value, not the unconfigured default)
+    so the two never drift apart."""
+    return int(os.environ.get(MIN_SESSIONS_ENV_VAR, MIN_SESSIONS))
+
 
 class NotEnoughHistoryResult(NamedTuple):
     """Returned by run_gepa_optimization() instead of a gepa.GEPAResult when a skill
@@ -228,7 +245,7 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
         ) from e
 
     sessions = fetch_sessions.sessions_for_skill(skill_name)
-    if len(sessions) < MIN_SESSIONS:
+    if len(sessions) < _resolve_min_sessions():
         return NotEnoughHistoryResult(
             status="not_enough_history",
             skill_name=skill_name,
@@ -237,10 +254,12 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
 
     gepa = _require_gepa()
     bound_evaluator = functools.partial(score_candidate, sessions=sessions)
+    max_metric_calls = (
+        iterations if iterations is not None
+        else int(os.environ.get(MAX_METRIC_CALLS_ENV_VAR, DEFAULT_MAX_METRIC_CALLS))
+    )
     config = gepa.GEPAConfig(
-        engine=gepa.EngineConfig(
-            max_metric_calls=iterations if iterations is not None else DEFAULT_MAX_METRIC_CALLS
-        ),
+        engine=gepa.EngineConfig(max_metric_calls=max_metric_calls),
         reflection=gepa.ReflectionConfig(reflection_lm=_reflection_lm_adapter),
     )
     return gepa.optimize_anything(
@@ -409,7 +428,7 @@ def _run_skill(skill_name: str, iterations: Optional[int]) -> None:
     if isinstance(result, NotEnoughHistoryResult):
         print(
             f"Not enough session history for skill '{skill_name}' "
-            f"({result.session_count} session(s) recorded, {MIN_SESSIONS} required); "
+            f"({result.session_count} session(s) recorded, {_resolve_min_sessions()} required); "
             "skipping optimization, no proposal written.",
             file=sys.stderr,
         )

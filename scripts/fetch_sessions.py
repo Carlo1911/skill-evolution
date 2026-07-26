@@ -203,9 +203,14 @@ SKILL_MESSAGE_QUERY = """
 
 DEFAULT_MAX_SESSIONS_FOR_SKILL = 20
 
+# U4: overridable via env var, following evaluate.py's SKILL_EVOLUTION_<NOUN>
+# convention (an OPTIMIZER_ segment distinguishes this optimizer-only tunable
+# from the shared evaluation-gate ones).
+MAX_SESSIONS_FOR_SKILL_ENV_VAR = "SKILL_EVOLUTION_OPTIMIZER_MAX_SESSIONS_FOR_SKILL"
+
 
 def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH,
-                        max_sessions: int = DEFAULT_MAX_SESSIONS_FOR_SKILL) -> List[Dict[str, Any]]:
+                        max_sessions: Optional[int] = None) -> List[Dict[str, Any]]:
     """Return a skill's most recent recorded session history, most-recent first.
 
     Unlike fetch_sessions(), this is not gated by the cron pipeline's
@@ -216,8 +221,15 @@ def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH,
 
     Capped at `max_sessions` (most recent by `started_at`) so a popular skill's
     accumulated history doesn't grow the rendered excerpt text -- and therefore
-    every downstream LLM prompt built from it -- without bound.
+    every downstream LLM prompt built from it -- without bound. When
+    `max_sessions` is not explicitly passed, the cap is resolved from
+    MAX_SESSIONS_FOR_SKILL_ENV_VAR at call time (falling back to
+    DEFAULT_MAX_SESSIONS_FOR_SKILL), not baked into the default-argument value
+    -- which would only be read once, at import time.
     """
+    if max_sessions is None:
+        max_sessions = int(os.environ.get(MAX_SESSIONS_FOR_SKILL_ENV_VAR, DEFAULT_MAX_SESSIONS_FOR_SKILL))
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 

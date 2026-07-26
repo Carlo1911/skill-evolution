@@ -20,6 +20,8 @@ from evaluate import EvalResult
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     monkeypatch.delenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, raising=False)
+    monkeypatch.delenv(optimize_skill.MIN_SESSIONS_ENV_VAR, raising=False)
+    monkeypatch.delenv(optimize_skill.MAX_METRIC_CALLS_ENV_VAR, raising=False)
 
 
 @pytest.fixture
@@ -270,6 +272,107 @@ def test_iterations_zero_is_respected_not_treated_as_unset(tmp_path, monkeypatch
     optimize_skill.run_gepa_optimization("zero-iter-skill", iterations=0)
 
     assert capture["config"].engine.max_metric_calls == 0
+
+
+# ── U4: env-var overrides for MIN_SESSIONS / DEFAULT_MAX_METRIC_CALLS ────
+#
+# R5/R6: each of the optimizer's tunable constants is overridable via a
+# SKILL_EVOLUTION_OPTIMIZER_<NOUN> env var, read at the point of use (not
+# baked into a function default-argument value), with today's constant as
+# the fallback when unset. No default value itself changes.
+
+
+def test_min_sessions_env_var_override_still_blocks_below_threshold(tmp_path, monkeypatch):
+    """SKILL_EVOLUTION_OPTIMIZER_MIN_SESSIONS=5 raises the bar above the default (3):
+    a skill with 4 sessions now returns NotEnoughHistoryResult."""
+    monkeypatch.setenv(optimize_skill.MIN_SESSIONS_ENV_VAR, "5")
+    skill_md_path = _make_fake_skill(tmp_path, name="min-sessions-skill")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "min-sessions-skill", "category": "cat", "description": "", "path": skill_md_path, "size": 5},
+    ])
+    monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(4))
+
+    def fail_if_called():
+        raise AssertionError("_require_gepa must not be called below the overridden MIN_SESSIONS threshold")
+    monkeypatch.setattr(optimize_skill, "_require_gepa", fail_if_called)
+
+    result = optimize_skill.run_gepa_optimization("min-sessions-skill")
+
+    assert result.status == "not_enough_history"
+    assert result.session_count == 4
+
+
+def test_min_sessions_env_var_override_allows_at_new_threshold(tmp_path, monkeypatch):
+    """The flip side: exactly the overridden threshold (5) proceeds into gepa."""
+    monkeypatch.setenv(optimize_skill.MIN_SESSIONS_ENV_VAR, "5")
+    skill_md_path = _make_fake_skill(tmp_path, name="min-sessions-skill-2")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "min-sessions-skill-2", "category": "cat", "description": "", "path": skill_md_path, "size": 5},
+    ])
+    monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(5))
+
+    fake_gepa = _make_fake_gepa()
+    monkeypatch.setattr(optimize_skill, "_require_gepa", lambda: fake_gepa)
+
+    result = optimize_skill.run_gepa_optimization("min-sessions-skill-2")
+
+    assert not isinstance(result, optimize_skill.NotEnoughHistoryResult)
+
+
+def test_run_skill_not_enough_history_message_uses_resolved_min_sessions(monkeypatch, capsys):
+    """_run_skill()'s printed message must report the actually-resolved threshold,
+    not the unconfigured MIN_SESSIONS default, when the env var override is set."""
+    monkeypatch.setenv(optimize_skill.MIN_SESSIONS_ENV_VAR, "5")
+    monkeypatch.setattr(
+        optimize_skill, "run_gepa_optimization",
+        lambda skill_name, iterations=None: optimize_skill.NotEnoughHistoryResult(
+            status="not_enough_history", skill_name=skill_name, session_count=4,
+        ),
+    )
+
+    optimize_skill._run_skill("some-skill", None)
+
+    captured = capsys.readouterr()
+    assert "5 required" in captured.err
+    assert "3 required" not in captured.err
+
+
+def test_max_metric_calls_env_var_override(tmp_path, monkeypatch):
+    """SKILL_EVOLUTION_OPTIMIZER_MAX_METRIC_CALLS overrides DEFAULT_MAX_METRIC_CALLS
+    (20) as the max_metric_calls fallback when no explicit --iterations is given."""
+    monkeypatch.setenv(optimize_skill.MAX_METRIC_CALLS_ENV_VAR, "50")
+    skill_md_path = _make_fake_skill(tmp_path, name="metric-calls-skill")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "metric-calls-skill", "category": "cat", "description": "", "path": skill_md_path, "size": 5},
+    ])
+    monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(5))
+
+    capture = {}
+    fake_gepa = _make_fake_gepa(capture=capture)
+    monkeypatch.setattr(optimize_skill, "_require_gepa", lambda: fake_gepa)
+
+    optimize_skill.run_gepa_optimization("metric-calls-skill")
+
+    assert capture["config"].engine.max_metric_calls == 50
+
+
+def test_explicit_iterations_overrides_max_metric_calls_env_var(tmp_path, monkeypatch):
+    """Precedence: explicit `iterations` argument beats the env var, which beats
+    the module constant default."""
+    monkeypatch.setenv(optimize_skill.MAX_METRIC_CALLS_ENV_VAR, "50")
+    skill_md_path = _make_fake_skill(tmp_path, name="metric-calls-skill-2")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "metric-calls-skill-2", "category": "cat", "description": "", "path": skill_md_path, "size": 5},
+    ])
+    monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(5))
+
+    capture = {}
+    fake_gepa = _make_fake_gepa(capture=capture)
+    monkeypatch.setattr(optimize_skill, "_require_gepa", lambda: fake_gepa)
+
+    optimize_skill.run_gepa_optimization("metric-calls-skill-2", iterations=7)
+
+    assert capture["config"].engine.max_metric_calls == 7
 
 
 def test_reflection_lm_fails_closed_on_provider_error(tmp_path, monkeypatch):

@@ -266,6 +266,61 @@ def test_max_sessions_caps_and_prefers_most_recent(db_path):
     assert [r["session_id"] for r in results] == ["sess-4", "sess-3"]
 
 
+# ── U4: SKILL_EVOLUTION_OPTIMIZER_MAX_SESSIONS_FOR_SKILL env var override ──
+#
+# R5/R6: DEFAULT_MAX_SESSIONS_FOR_SKILL is overridable via env var, resolved
+# inside the function body (not baked into the default-arg value, which would
+# only be read once at import time). An explicit max_sessions argument still
+# takes precedence over the env var.
+
+
+def test_max_sessions_env_var_override_caps_below_default(db_path, monkeypatch):
+    monkeypatch.setenv(fetch_sessions.MAX_SESSIONS_FOR_SKILL_ENV_VAR, "3")
+    conn = sqlite3.connect(db_path)
+    for i in range(6):
+        sid = f"sess-{i}"
+        _insert_session(conn, sid, started_at=float(i))  # sess-5 is most recent
+        _insert_message(conn, sid, "assistant", tool_calls=_tool_call("skill_view", "my-skill"))
+    conn.commit()
+    conn.close()
+
+    results = fetch_sessions.sessions_for_skill("my-skill", db_path=db_path)
+
+    assert [r["session_id"] for r in results] == ["sess-5", "sess-4", "sess-3"]
+
+
+def test_explicit_max_sessions_overrides_env_var(db_path, monkeypatch):
+    monkeypatch.setenv(fetch_sessions.MAX_SESSIONS_FOR_SKILL_ENV_VAR, "3")
+    conn = sqlite3.connect(db_path)
+    for i in range(6):
+        sid = f"sess-{i}"
+        _insert_session(conn, sid, started_at=float(i))
+        _insert_message(conn, sid, "assistant", tool_calls=_tool_call("skill_view", "my-skill"))
+    conn.commit()
+    conn.close()
+
+    results = fetch_sessions.sessions_for_skill("my-skill", db_path=db_path, max_sessions=2)
+
+    assert [r["session_id"] for r in results] == ["sess-5", "sess-4"]
+
+
+def test_max_sessions_env_var_unset_uses_default(db_path, monkeypatch):
+    """Regression: with the env var unset, behavior is unchanged -- all sessions
+    under the DEFAULT_MAX_SESSIONS_FOR_SKILL (20) cap come back."""
+    monkeypatch.delenv(fetch_sessions.MAX_SESSIONS_FOR_SKILL_ENV_VAR, raising=False)
+    conn = sqlite3.connect(db_path)
+    for i in range(3):
+        sid = f"sess-{i}"
+        _insert_session(conn, sid, started_at=float(i))
+        _insert_message(conn, sid, "assistant", tool_calls=_tool_call("skill_view", "my-skill"))
+    conn.commit()
+    conn.close()
+
+    results = fetch_sessions.sessions_for_skill("my-skill", db_path=db_path)
+
+    assert len(results) == 3
+
+
 def test_no_side_effects_no_state_file_written(db_path, tmp_path, monkeypatch):
     """sessions_for_skill() must not call mark_processed() or touch the
     cron pipeline's state file."""
