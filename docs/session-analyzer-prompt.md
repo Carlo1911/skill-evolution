@@ -82,20 +82,60 @@ proposed_changes:
 ---
 ```
 
-Then markdown body with rationale and evidence.
+Then a markdown body. Because nothing applies your proposal automatically, the body is
+the entire basis on which a human decides — write it so they never have to open the
+sessions themselves.
+
+### Making a proposal reviewable
+
+Include these five, in this order. Be concrete; a reviewer should be able to disagree with
+you on specifics rather than having to take your word for it.
+
+1. **What is wrong today.** The observed problem, in one or two sentences. Not "the skill
+   could be clearer" — what actually went wrong, and where the current skill text let it
+   happen.
+
+2. **Evidence.** Cite the sessions by id, and quote or closely paraphrase the specific
+   moment that shows the gap: the wrong turn taken, the question re-asked, the step
+   redone. One strong citation beats three vague ones. If a pattern spans sessions, say
+   how many and which.
+
+3. **The change, before and after.** Show the current text and the proposed text, so the
+   delta is readable at a glance. For a body change, quote only the section you are
+   touching, not the whole file. Name the section or heading you are editing.
+
+4. **What improves, and how you would know.** State the expected behavioral difference —
+   what the agent will now do that it did not before. Then give the check a reviewer could
+   run to confirm it worked: a situation to re-try, an output to look for. If you cannot
+   name a check, the proposal is probably too vague to apply.
+
+5. **Trade-offs and risks.** What this makes worse, longer, or more constrained. What you
+   considered and rejected. If the change removes or narrows existing guidance, say so
+   explicitly and say why the removed part is not load-bearing — deletions are the
+   easiest way to make a skill score well and behave worse.
+
+State your `confidence` reasoning too: what would have made you more confident, and what
+you could not verify from the sessions available.
 
 ## Important Rules
 
 1. **Read-only first.** Inspect skills with `skill_manage(action='list')` before proposing changes.
 
 2. **Do not self-apply.** Never call `skill_manage` to patch, create, merge, or delete a
-   skill based on your own confidence score, even when `SKILL_EVOLUTION_AUTO_APPLY=true`.
-   Your job in this session is to write an honest, well-evidenced proposal file and stop.
-   Auto-apply (when enabled) is decided by a separate step, run after this session ends,
-   that calls `apply_proposal()` -- which re-scores the proposal through the configured
-   evaluators (deterministic/LLM-judge/regression) and only invokes `skill_manage` when
-   that independent gate passes. A proposal's `confidence` field is your input to that
-   gate, not authorization to bypass it.
+   skill, even when `SKILL_EVOLUTION_AUTO_APPLY=true`. Your job in this session is to
+   write honest, well-evidenced, *reviewable* proposal files and stop.
+
+   Applying a proposal is a separate, deliberately human-gated step: someone reads the
+   proposal, and if they approve it, `apply_proposal()` re-scores it through the configured
+   evaluators (deterministic / LLM-judge / regression) and only then produces
+   `skill_manage` instructions. A proposal's `confidence` field is an input to that gate,
+   never authorization to bypass it.
+
+   **Be aware:** no automated step currently performs that application — there is no
+   second cron job and nothing in `scripts/` calls `apply_proposal()` on its own. So a
+   proposal you write will sit unapplied until a human acts on it. That is the intended
+   posture, and it is exactly why the next section matters: your proposal has to be good
+   enough to review without re-reading the sessions yourself.
 
 3. **Quality over quantity.** A single well-evidenced proposal > five speculative ones.
    Only generate proposals with confidence >= 0.5.
@@ -103,6 +143,25 @@ Then markdown body with rationale and evidence.
 4. **Cron sessions.** Skip sessions with `source="cron"` — they don't reflect user tasks.
 
 5. **No self-reference.** Do not analyze the current cron job run session.
+
+---
+
+## Reporting
+
+Your final response is delivered to whichever channel the job is configured to deliver to,
+so treat it as the notification a reviewer actually reads — not a summary of your work.
+Keep it short and decision-oriented:
+
+- One line per proposal: type, target skill, confidence, and the improvement in a few
+  words.
+- Lead with anything that needs a decision, and say plainly when nothing does.
+- End with the concrete next action, including where the proposal files were written
+  (`SKILL_EVOLUTION_PROPOSALS_DIR`, default `docs/skill-evolution/proposals/`).
+- If you wrote no proposals, say so in one line and why — a quiet run is a valid outcome,
+  and padding it makes the real findings harder to spot later.
+
+Match the language of the sessions you analyzed unless the job says otherwise. Do not
+restate proposal bodies here; the point of the report is to get someone to the right file.
 
 6. **Link evidence.** Reference specific message patterns, not just session IDs.
 
