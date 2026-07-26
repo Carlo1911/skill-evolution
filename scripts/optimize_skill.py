@@ -303,12 +303,12 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     return gepa_api.optimize_anything(
         seed_candidate=seed_body,
         evaluator=bound_evaluator,
-        objective=_build_objective(seed_body),
+        objective=_build_objective(seed_body, skill_name),
         config=config,
     )
 
 
-def _build_objective(seed_body: str) -> str:
+def _build_objective(seed_body: str, skill_name: str) -> str:
     """The instruction gepa's reflection LM optimizes against.
 
     Carries the byte budget the deterministic gate will enforce, derived from the same
@@ -316,6 +316,14 @@ def _build_objective(seed_body: str) -> str:
     discovering it after the run. Without this the objective mentioned only the task: a
     real run converged on a +121.8% candidate that was inadmissible from the first byte,
     spending its whole metric-call budget on candidates the gate had to discard.
+
+    The window is the **intersection** of both limits the gate applies: the per-pass ones
+    against the body being replaced, and the cumulative ones against where the target
+    started (evaluate.original_size_for_target). Stating only the per-pass window
+    advertised more room than the gate would accept for any skill already partway toward
+    its cumulative ceiling -- the same objective-vs-constraint mismatch in narrower form.
+    With no recorded history there is no cumulative constraint, and the per-pass window
+    stands unchanged.
 
     This is a *soft* defence -- a prompt the model may ignore -- so it does not replace
     DeterministicEvaluator's hard check. Its value is not wasting budget.
@@ -332,7 +340,7 @@ def _build_objective(seed_body: str) -> str:
     lower = int(base * (1 - max_shrink / 100))
     upper = int(base * (1 + max_growth / 100))
 
-    return (
+    task = (
         # Deliberately agent-neutral: the same skill-body optimization applies to any
         # agent whose sessions and skills this pipeline can read (Hermes today; Codex,
         # Claude Code and others if the source adapters below are generalized). Naming a
@@ -340,11 +348,49 @@ def _build_objective(seed_body: str) -> str:
         # host's conventions.
         "Improve this agent skill's instructions based on how it performed "
         "in real recorded sessions.\n\n"
-        f"HARD SIZE BUDGET: the current body is {base} bytes. Your revision must be "
-        f"between {lower} and {upper} bytes (at most -{max_shrink:g}% / +{max_growth:g}%). "
-        "A revision outside that range is rejected outright, however good it is.\n"
-        "Preserve every existing section heading unless it is genuinely redundant; "
+    )
+    preserve = (
+        "\nPreserve every existing section heading unless it is genuinely redundant; "
         "deleting guidance to save space is not an improvement."
+    )
+
+    original = evaluate.original_size_for_target(f"skill:{skill_name}")
+    cumulative_note = ""
+    if original:
+        cum_growth = evaluate.env_float(evaluate.MAX_CUMULATIVE_GROWTH_PCT_ENV_VAR,
+                                        evaluate.DEFAULT_MAX_CUMULATIVE_GROWTH_PCT)
+        cum_shrink = evaluate.env_float(evaluate.MAX_CUMULATIVE_SHRINK_PCT_ENV_VAR,
+                                        evaluate.DEFAULT_MAX_CUMULATIVE_SHRINK_PCT)
+        cum_lower = int(original * (1 - cum_shrink / 100))
+        cum_upper = int(original * (1 + cum_growth / 100))
+
+        if cum_lower > lower or cum_upper < upper:
+            cumulative_note = (
+                f" This skill started at {original} bytes and total drift is capped "
+                f"separately, which is what narrows the range above."
+            )
+        lower, upper = max(lower, cum_lower), min(upper, cum_upper)
+
+        if lower > upper:
+            # An empty window: telling the model to land "between X and Y" with X > Y is
+            # worse than saying nothing, so name the situation instead.
+            return (
+                task
+                + f"SIZE CONSTRAINT: there is no admissible size for a revision of this "
+                f"skill. It is {base} bytes and already beyond the cumulative drift "
+                f"allowance measured from its original {original} bytes, so any body "
+                f"change will be rejected on size alone. Improve wording and structure "
+                f"strictly within the current length -- do not add or remove material."
+                + preserve
+            )
+
+    return (
+        task
+        + f"HARD SIZE BUDGET: the current body is {base} bytes. Your revision must be "
+        f"between {lower} and {upper} bytes. "
+        f"A revision outside that range is rejected outright, however good it is."
+        + cumulative_note
+        + preserve
     )
 
 

@@ -12,8 +12,8 @@ than restating it, so the two do not drift. (Three divergent copies of
 `fetch_sessions.py` are what caused P0-1 below; duplicating prose is the same failure mode
 in a cheaper form.)
 
-Test baseline: **318 passed** with `gepa` installed, **314 passed + 1 skipped** without
-(was 253/249 when this document was first written; P0-1 and P0-3 added the rest).
+Test baseline: **351 passed** with `gepa` installed, **347 passed + 1 skipped** without
+(was 253/249 when this document was first written; the P0 and P1 items added the rest).
 
 ---
 
@@ -235,7 +235,22 @@ posture the evaluation plan's R21 asks for argues for it.
 
 Self-audit. Both are small and both are mine.
 
-### P1-1. `_build_objective()` understates the real constraint
+### ~~P1-1. `_build_objective()` understates the real constraint~~ — RESOLVED 2026-07-26
+
+The stated range is now the **intersection** of the per-pass and cumulative limits, so it
+matches what the gate will actually accept. `_build_objective()` takes the skill name and
+resolves `original_size_for_target()`; with no history the cumulative half stays inert and
+the per-pass window is unchanged. When the cumulative limit is the binding one the objective
+also says why, naming the original size. If the intersection is empty — a skill already past
+its cumulative allowance — it states that no admissible size exists and asks for rewording
+within the current length, rather than emitting an impossible "between X and Y" with X > Y.
+
+Demonstrated on a 635-byte seed: no history → 539–762 bytes; the same seed recorded as
+already +40% from its original → 539–**679**, the ceiling narrowed by the cumulative cap.
+
+<details><summary>Original finding</summary>
+
+#### P1-1. `_build_objective()` understates the real constraint
 
 It reads only the per-pass growth/shrink limits, not the cumulative ones
 (`grep CUMULATIVE scripts/optimize_skill.py` → no match). For a skill already near its
@@ -243,7 +258,19 @@ cumulative ceiling, the byte range handed to GEPA's reflection LM is wider than 
 gate will actually accept — reintroducing, in narrower form, the exact
 objective-vs-constraint mismatch the budget was added to remove.
 
-### P1-2. `old_value` population is untested
+</details>
+
+### ~~P1-2. `old_value` population is untested~~ — RESOLVED 2026-07-26
+
+Three tests now cover it: that a drafted proposal carries the installed body verbatim as
+`old_value`; that the gate consequently sees a real baseline (an admissible candidate passes
+`evaluate_skill_text()`, and a gutting candidate is rejected at draft time on the shrink
+floor); and that `old_value` is absent when the skill cannot be resolved, which is KTD3's
+documented best-effort behaviour rather than a failure.
+
+<details><summary>Original finding</summary>
+
+#### P1-2. `old_value` population is untested
 
 `draft_proposal_from_gepa_result()` now sets `old_value` via `_installed_body()` so both
 size guards stay live at the gate, but no test asserts it (`grep old_value tests/` →
@@ -373,7 +400,7 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 2. ~~**P0-3** — guard the env parsing.~~ **Done 2026-07-26**, along with P2-5.
 3. ~~**P0-2** — decide on PII.~~ **Done 2026-07-26**: identifiers masked, amounts kept,
    sign-off recorded.
-4. **P1-1, P1-2** — close today's own two gaps while the context is fresh.
+4. ~~**P1-1, P1-2** — close today's own two gaps.~~ **Done 2026-07-26.**
 5. **P2-1..P2-5** — documentation, batched. Cheap, and a prerequisite for item 8.
 6. Then choose between **item 7** (multi-agent, highest owner interest) and **item 1**
    (evaluation coverage, unblocks the shared-core claim).

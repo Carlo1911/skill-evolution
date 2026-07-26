@@ -680,6 +680,70 @@ def test_draft_proposal_from_gepa_result_does_not_construct_proposal_on_failure(
         optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
 
 
+def test_drafted_proposal_carries_the_installed_body_as_old_value(tmp_path, monkeypatch):
+    """Without old_value, both size guards are inert at the gate.
+
+    evaluate_skill_text() derives baseline_size from the change's old_value, so an empty
+    one means apply_proposal() re-checks neither growth nor shrink -- they would only ever
+    run here, at draft time. It also gives a human reviewer a real before/after.
+    """
+    installed = "---\nname: my-skill\ndescription: a test skill\n---\n\nOriginal body text here.\n"
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(installed)
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "my-skill", "category": "cat", "description": "d",
+         "path": str(skill_md), "size": len(installed)}])
+
+    candidate = "---\nname: my-skill\ndescription: a test skill\n---\n\nRevised body text here.\n"
+    drafted = optimize_skill.draft_proposal_from_gepa_result(
+        "my-skill", _make_gepa_result(best_candidate=candidate))
+
+    change = drafted.proposed_changes[0]
+    assert change.old_value == installed, "old_value must be the installed body verbatim"
+    assert change.new_value == candidate
+
+
+def test_old_value_makes_the_gate_see_a_baseline(tmp_path, monkeypatch):
+    """End-to-end consequence: the gate must compute a size delta for a drafted proposal."""
+    installed = "---\nname: my-skill\ndescription: a test skill\n---\n\n" + ("guidance line.\n" * 40)
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(installed)
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "my-skill", "category": "cat", "description": "d",
+         "path": str(skill_md), "size": len(installed)}])
+    monkeypatch.setenv("SKILL_EVOLUTION_EVALUATORS", "deterministic")
+
+    gutted = "---\nname: my-skill\ndescription: a test skill\n---\n\nguidance line.\n"
+
+    # Draft-time validation catches it first, so no proposal is even constructed.
+    with pytest.raises(ValueError, match="shrink"):
+        optimize_skill.draft_proposal_from_gepa_result(
+            "my-skill", _make_gepa_result(best_candidate=gutted))
+
+    # And for a candidate that *is* admissible, the gate gets a real baseline to measure
+    # against -- which is the whole point of populating old_value.
+    ok = installed.rstrip() + "\nOne more guidance line.\n"
+    drafted = optimize_skill.draft_proposal_from_gepa_result(
+        "my-skill", _make_gepa_result(best_candidate=ok))
+
+    import evaluate
+    results = evaluate.evaluate_skill_text(drafted)
+    assert results[0].passed is True, results[0].feedback
+    assert drafted.proposed_changes[0].old_value, "gate would have no baseline to measure"
+
+
+def test_old_value_absent_when_the_skill_cannot_be_resolved(monkeypatch):
+    """No installed match -> no baseline available; draft still proceeds (KTD3)."""
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result(
+        "vanished-skill",
+        _make_gepa_result(
+            best_candidate="---\nname: vanished-skill\ndescription: d\n---\n\nBody.\n"))
+
+    assert not drafted.proposed_changes[0].old_value
+
+
 def test_gepa_flow_produces_saved_proposal_for_target_skill(tmp_path, isolated_dirs, monkeypatch):
     """Exercises the full pipeline end to end -- run_gepa_optimization() (stubbed `gepa`
     module, fixture session history) feeding draft_proposal_from_gepa_result() feeding
