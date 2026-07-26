@@ -12,8 +12,11 @@ inventory, not a committed roadmap — pick an item, then run it through
 ## Not yet built (from the original gap analysis)
 
 Seven areas were identified against `docs/plans/2026-07-23-001-feat-skill-evolution-evaluation-plan.md`
-and `docs/integration-plan.md`. The GEPA optimizer was one; these six are
-untouched.
+and `docs/integration-plan.md`. The GEPA optimizer was one; items 1–6 are the
+rest. Item 7 is newer and did not come from that analysis. Two have moved during
+the Fase 0 pass below — item 2 is now partially done (OpenCode Zen landed) and
+item 5's cold-start blocker is closed — so read each item's own status rather
+than assuming the whole list is untouched.
 
 1. **Evaluation coverage expansion.** Only `evaluate_skill_text()` exists.
    Missing: proposal-quality, tool-call-quality, and analyzer-prompt-quality
@@ -37,20 +40,41 @@ untouched.
    `ai-memory-stack`, not this repo. The original plan gates this on the
    shared-core evaluators completing clean retroactive runs against real
    historical sessions — a condition unrelated to GEPA shipping.
-   **The gating condition as worded is not directly executable** (found in the
-   Fase 0 pass below): `--retroactive` re-evaluates *saved proposals*, not
-   sessions — `_select_retroactive_proposals()` loads proposals from disk and
-   filters `status == proposed`. With no proposals on disk it is a clean no-op
-   ("Nothing to re-evaluate"), and `--list-candidates` is likewise a no-op with
-   no `eval_history.jsonl`. Restate the gate as "a clean retroactive run over
-   real *proposals*", and note that proposals only come into existence from the
-   LLM analyst step, the optimizer, or by hand — so bootstrapping the corpus is
-   itself a prerequisite step, not a side effect.
+   **The gating condition as worded was not directly executable**: `--retroactive`
+   re-evaluates *saved proposals*, not sessions — `_select_retroactive_proposals()`
+   loads proposals from disk and filters `status == proposed`. With no proposals on
+   disk it is a clean no-op ("Nothing to re-evaluate"), and `--list-candidates` is
+   likewise a no-op with no `eval_history.jsonl`. Read the gate as "a clean
+   retroactive run over real *proposals*".
+
+   **That cold start is now closed** — see "The analyzer half" below: a real
+   analysis pass produced a 5-proposal corpus from real sessions, all 5 scored
+   through the three-evaluator gate and re-evaluated retroactively. What remains
+   for this item is operational, not blocked: pointing
+   `~/.hermes/cron/jobs.json` at this repo. Both policy questions that were open
+   here have since been decided — the shrink floor is 15% per pass with a 30%
+   cumulative ceiling, and the optimizer's objective now carries the byte budget.
 6. **Heavier evaluation techniques.** Pairwise/win-rate comparison,
    debate/ensemble judging, execution-based re-run verification,
    embedding-similarity checks, fine-tuned local judges — catalogued and
    deliberately deferred in the evaluation plan's Scope Boundaries. Not
    reconsidered since.
+7. **Host-agnostic / multi-agent support.** *(New — not from the original gap
+   analysis.)* Let the pipeline evolve skills for agents other than Hermes:
+   Codex, Claude Code, Claude, and future providers. **Guiding principle,
+   stated by the project owner: the more agnostic the design, the better** —
+   treat host-neutrality as the default for new work rather than something
+   retrofitted later, and prefer an adapter seam over an inline assumption
+   whenever a host-specific detail would otherwise be hardcoded.
+   The concrete surface is already mapped: exactly four hardcoded coupling
+   points, each isolated in its own module (session source, skill source,
+   processed state, mutation tool) — see "Multi-agent support: four seams"
+   below for the table and the read-side/write-side asymmetry. Everything else
+   (evaluator registry, gate, size guards, history, provider layer, analyzer
+   prompt) is already host-agnostic because it operates on skill *text* and
+   proposal *shape*, not on provenance. Scope the read side first: it
+   generalizes far more cheaply than the write side, which needs a per-host
+   apply strategy since no host outside Hermes exposes `skill_manage`.
 
 ## Discovered while building GEPA, fixed in the hardening pass
 
@@ -167,51 +191,213 @@ valset. The loop is slow — 4 metric calls exceeded two minutes — so run it
 detached, not inline. Session availability is not a blocker: 12 installed skills
 have ≥3 sessions (`hermes-agent` 20, `money-admin-messaging` 8, `llm-wiki` 8, …).
 
-### Blocker: the optimizer's objective ignores the constraint it is gated on
+### Size limits vs. the optimizer: three runs, not one
 
-The run produced **no proposal**. `draft_proposal_from_gepa_result()`'s
-structural check rejected the winner:
+An earlier draft of this document concluded from the single
+`money-admin-messaging` run that the optimizer was "near-unproductive". **That
+was an overgeneralization from n=1 and is retracted.** Two further runs both
+drafted proposals successfully:
 
-```
-growth 121.8% exceeds 20% limit over baseline
-```
+| skill | installed | seed → best | outcome |
+|---|---|---|---|
+| `money-admin-messaging` | 1861B | 0.55 → 0.633 | rejected: growth **+121.8%** |
+| `hermes-agent` | 11884B | 0.80 → 0.80 | proposal drafted (+0.7%, no score gain) |
+| `test-driven-development` | 10258B | 0.85 → **0.90** | proposal drafted (**−70.4%**) |
 
-Baseline 1861B; the 20% cap allows 2233B; the winning candidate was ~4127B.
+The growth rejection was specific to a 1861B skill, where the 20% cap allows
+only +368B — almost any added detail breaches it. Skills with real headroom
+optimize fine. So the objective/constraint mismatch is real but narrow: worth
+addressing (passing the byte budget into `run_gepa_optimization()`'s `objective`
+string is the cheapest fix, so the search optimizes inside the budget it is
+judged against), not a blocker.
 
-This is a design conflict, not a bug — both halves did exactly what they were
-built to do. GEPA optimizes purely for the judge's score, gepa's reflective
-mutation expands prose to raise it, and *nothing in the objective string tells
-it a hard size ceiling exists*. So the search reliably converges on candidates
-the gate must then throw away. Note the judge's rubric already includes
-`conciseness` and the longer document still won, meaning correctness and
-procedure-following gains outweighed it — a rubric weight will not fix this on
-its own.
+### The actual danger found by those runs: unbounded shrink
 
-As configured, `optimize_skill.py` is therefore near-unproductive for any skill
-whose improvements involve added detail: it burns metric calls to produce
-candidates that are structurally inadmissible. Options, cheapest first:
+`test-driven-development` is the serious result. GEPA raised the score by
+**deleting 70% of the body** (10258B → 3041B), and the judge rated the gutted
+version *higher* (0.85 → 0.90). 17 of 29 headings were lost, including
+`## Red Flags — STOP and Start Over`, `## Common Rationalizations`,
+`## Testing Anti-Patterns`, `## Avoid Horizontal Slices`, and the
+`Verify RED`/`Verify GREEN` steps with their commands — the guardrail sections.
 
-1. **State the constraint in the objective** — pass the byte ceiling into
-   `run_gepa_optimization()`'s `objective` string so the reflection LM optimizes
-   inside the budget it will be judged against. Most principled: today the
-   search optimizes one objective and is gated on another.
-2. **Per-origin growth policy** — let optimizer-drafted proposals carry a
-   higher cap (a `SKILL_EVOLUTION_MAX_GROWTH_PCT_OPTIMIZER`-style override),
-   accepting that GEPA rewrites wholesale rather than patching.
-3. **Reject early** — score candidates that breach the ceiling at 0 inside
-   `score_candidate()` so gepa learns the constraint through its own feedback
-   loop rather than discovering it after the run ends.
-4. **Leave as-is** and treat the optimizer as a tightening-only tool.
+The gate had a growth cap and **no floor**, so this passed structural validation
+cleanly. The judge's `conciseness` criterion actively rewards it, meaning the
+optimizer will find this attractor repeatedly. The only thing standing between
+it and a silently gutted skill was that optimizer proposals carry
+`confidence=0.5`, below `apply_proposal()`'s 0.85 default — safety by accident,
+not by design.
 
-Whichever is chosen should be decided before item 5's cron migration: an
-auto-apply loop that regularly discards its own optimizer output is wasted
-budget.
+Fixed: `DeterministicEvaluator` now enforces a shrink floor
+(`SKILL_EVOLUTION_MAX_SHRINK_PCT`, default 20%, symmetric with the growth cap),
+and `draft_proposal_from_gepa_result()` now populates the change's `old_value`
+with the installed body so both size guards stay live at the gate — previously
+`old_value` was empty on optimizer proposals, leaving those checks inert
+everywhere except draft time.
+
+**Both follow-ups are now implemented.**
+
+*Decision on the floor: **15%** per pass* (`SKILL_EVOLUTION_MAX_SHRINK_PCT`,
+configurable as it always was — only the default moved). Measured against the
+real candidates, 10/20/30% were indistinguishable: the destructive one was −70.4%
+(rejected at any threshold) and the good one +0.7% (accepted at any). The
+threshold was never the weak point, so the choice came down to blast radius per
+pass — 15% caps one bite at ~1.4KB of a median 9.7KB skill instead of ~1.9KB.
+It is intentionally tighter than the 20% growth cap: an over-long skill is
+bounded by the absolute 15KB check and merely costs context, while deletion
+silently removes guidance.
+
+Worth knowing: the **cumulative** limit, not the per-pass one, governs where
+erosion stops. At a 15% floor the cumulative 30% ceiling is reached at pass 3
+(62% retained); at 20% it was pass 2 (64% retained). Retuning the per-pass floor
+changes how many passes it takes and how big each bite is — not the floor of the
+whole process.
+
+*The real weakness was that the floor is per-proposal, so it compounds.* Each
+pass resets its reference, and `RegressionEvaluator` cannot intervene because
+every deletion *raises* the judge's `conciseness` score — each pass legitimately
+outscores the last, so the gate keeps passing. Erosion is self-reinforcing.
+Passes needed to destroy half a skill: 7 at a 10% floor, 4 at 20%, **2 at 30%**
+— which is why widening the floor was the wrong lever.
+
+Fixed with a second reference point: `SKILL_EVOLUTION_MAX_CUMULATIVE_SHRINK_PCT`
+(default 30%) and `SKILL_EVOLUTION_MAX_CUMULATIVE_GROWTH_PCT` (default 50%),
+measured against `original_size_for_target()` — the earliest size recorded for
+that target in `eval_history.jsonl`. History entries now carry `content_size`
+and `baseline_size` to make that lookup possible; entries predating those fields
+yield `None` and leave the check inert. Verified by simulating repeated
+exact-20% cuts: erosion halts at pass 2 with 65% of the original retained
+instead of running to zero.
+
+*The objective now carries the byte budget.* `_build_objective()` states the
+seed's byte count, the allowed range from the same env limits the gate enforces,
+and an instruction to preserve section headings. Soft defence only — a prompt the
+model may ignore — so it complements rather than replaces the hard check; the
+point is not spending a metric-call budget on candidates that are inadmissible
+from the first byte.
+
+Percentage limits remain weakest where damage is largest: 20% of the median
+9,748B skill is ~1.9KB (several sections), and 20% of the largest (102KB) is
+20KB. An absolute byte floor alongside the percentages is the natural next step
+if that proves too loose in practice.
 
 ```bash
 pip install -e ".[dev,optimizer]"
 SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py --list-candidates
 SKILL_EVOLUTION_OPTIMIZER_ENABLED=true python3 scripts/optimize_skill.py --skill <name>
 ```
+
+### The analyzer half, run end to end (closes the cold start)
+
+`docs/session-analyzer-prompt.md` is what CLAUDE.md calls the business logic of
+the system, and it had never been executed. It has now, against real data:
+
+```
+fetch_sessions() -> analyze.format_session() -> analyzer prompt + skill index
+  -> OpenCode Zen (big-pickle) -> parse -> save_proposal() -> three-evaluator gate
+```
+
+8 real non-cron sessions → ~113KB of formatted evidence → a ~134KB assembled
+prompt (analyzer instructions + a 142-skill index + session text) → a valid JSON
+array of **5 proposals**, each grounded in session evidence:
+
+| type | target | conf | judge | gate |
+|---|---|---|---|---|
+| `create_new` | video/Threads download skill | 0.85 | 0.92 | **pass** |
+| `improve_existing` | `hermes-execution-contexts` (cron timeouts) | 0.75 | 0.87 | **pass** |
+| `create_new` | interview-feedback analysis | 0.80 | 0.87 | **pass** |
+| `improve_existing` | `hermes-provider-diagnostics` | 0.70 | 0.67 | **fail** |
+| `create_new` | RTK install/config skill | 0.65 | 0.80 | **pass** |
+
+The important result is the fourth row: the gate **rejected** one of the
+analyzer's own proposals on the judge threshold (0.67 < 0.7 default) while
+passing the other four. It discriminates on real analyzer output rather than
+rubber-stamping it. All 5 round-trip cleanly through the hand-rolled frontmatter
+parser, all 5 were picked up by `retroactive_reevaluate()`, and **0 unredacted
+secret lines** reached disk.
+
+Two design notes surfaced by the run:
+
+- **Prompt size is a real constraint.** 8 sessions already assemble a ~134KB
+  prompt. How many sessions one analysis pass can carry is bounded by the
+  provider's context window, so `--lookback-hours`/`max_sessions` are capacity
+  knobs, not just scope knobs.
+- **`create_new` proposals can never regress.** With `target_skill` empty,
+  `target_key_for_proposal()` falls back to `proposal:<uuid>`, so every
+  `create_new` gets its own single-entry history lineage and
+  `RegressionEvaluator` always reports "no baseline yet". Defensible (a new skill
+  has no baseline) but it means regression coverage is effectively
+  `improve_existing`-only.
+
+### Two production-blocking bugs in the state file and the redactor
+
+Found by the follow-up pass that closed the gaps the first Fase 0 sweep left.
+
+**Secret redaction leaked real credential shapes.** `contains_secret()` matched
+only fixed substrings (known vendor prefixes and specific env-var names).
+Scanning the real 26,794 message bodies found shapes it missed entirely: 27
+`password=`/`passwd:` assignments, 23 generic `*_TOKEN=`/`*_SECRET=`/`*_KEY=`
+assignments, 6 generic `sk-` keys, 5 `Authorization: Bearer` headers, and a
+credentialed database URI. Every one would have been forwarded verbatim — a gap
+that got materially worse the moment the `opencode` third-party provider landed.
+Fixed by adding shape-based `SECRET_REGEXES` alongside the substring list; a
+re-scan now misses nothing, and over-redaction is 0.229% of lines (741 of
+323,208), which is the right side of that trade.
+
+**The state file schema never matched reality, so dedup was dead.** The
+deployed `~/.hermes/skill_evolution_state.json` is a flat
+`{session_id: iso_timestamp}` map with 101 entries. Both `state.py` and
+`fetch_sessions.py` read `data.get("processed_sessions", [])` — the shape the
+deployed `SKILL.md` also documents — so `load_processed()` returned `[]` against
+the real file **every run**, and every session looked unprocessed. Worse,
+`mark_processed()` would have rewritten the file in the documented shape,
+destroying 101 entries another producer maintains. Fixed: both copies now read
+either shape and preserve whichever layout the file already uses, writing the
+documented shape only for a fresh file. Against the real file `load_processed()`
+went 0 → 101 ids, and `--dry-run --lookback-hours 168` went from "20
+unprocessed" to "0 unprocessed" — i.e. the repo's code would have re-analyzed 20
+already-processed sessions.
+
+Note the file itself was **not** modified; the schema disagreement between this
+repo and whatever writes that file is surfaced here rather than migrated
+unilaterally.
+
+### Environment note: zsh `noclobber`
+
+This machine's zsh has `noclobber` set, which makes `>>` **fail on a
+non-existent file** unless `APPEND_CREATE` is also set. Shell snippets that
+build up a log with `>>` silently produce nothing; redirect the whole block once
+with `>` instead. Cost one confusing empty-log debugging cycle.
+
+### Multi-agent support (Codex, Claude Code, …): four seams
+
+The GEPA objective string is now deliberately **agent-neutral** ("this agent
+skill's instructions", not "this Hermes Agent skill's"), both so the wording
+survives generalization and so the reflection LM isn't biased toward one host's
+conventions. `grep -c "Hermes Agent" scripts/*.py` is now zero.
+
+That is only the wording. The host coupling is real, but it is smaller than
+expected — **four hardcoded points, each already isolated in its own module**:
+
+| seam | where | what it assumes |
+|---|---|---|
+| session source | `fetch_sessions.py:23` | `~/.hermes/state.db`, SQLite with `sessions`/`messages` tables and that column layout |
+| skill source | `skill_index.py:2` | `~/.hermes/skills/<category>/<skill>/SKILL.md` |
+| processed state | `state.py:12` | `~/.hermes/skill_evolution_state.json` |
+| mutation tool | `proposal.py:298` | emits `skill_manage` instruction dicts |
+
+Everything else — the evaluator registry, the gate, the size guards, the history
+and its cumulative baseline, the provider adapter layer, the analyzer prompt — is
+already host-agnostic: it operates on skill *text* and proposal *shape*, not on
+where either came from.
+
+So generalizing is an adapter job at four seams, not a rewrite. What differs per
+host is substantial though, and worth scoping before committing: Claude Code
+keeps transcripts as per-project JSONL rather than one SQLite DB, skill layouts
+differ (`~/.claude/skills/`), and no host outside Hermes exposes a `skill_manage`
+tool — so the "apply" step needs a per-host strategy (direct file write plus
+whatever review/versioning that host expects) rather than one instruction dict.
+The read side (analyze + evaluate + propose) generalizes far more cheaply than
+the write side.
 
 ### Provider: OpenCode Zen (implemented)
 
