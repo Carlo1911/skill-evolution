@@ -9,6 +9,20 @@ product_contract_source: ce-brainstorm
 execution: code
 ---
 
+> **Status as of 2026-07-26 — the checkboxes below were never maintained.** All four units
+> shipped. Verified in [`../pending-work-2026-07-26.md`](../pending-work-2026-07-26.md).
+>
+> Two of this plan's own notes have since been overtaken. Its assumption A2 — that production
+> still ran `ai-memory-stack`, so the column fix had no live blast radius — was true when
+> written and is no longer: this repo is now the live pipeline (backlog P0-1). And its
+> accepted convention of "no malformed-value guarding beyond `int()`'s natural exception" was
+> reversed once that became true, since an unattended nightly run should not die on a typo'd
+> env var (backlog P0-3).
+>
+> Still open from here: the three optimizer tunables it made configurable (3 / 20 / 20) have
+> never been tuned against real usage.
+
+
 # Skill Evolution Pipeline Hardening - Plan
 
 ## Goal Capsule

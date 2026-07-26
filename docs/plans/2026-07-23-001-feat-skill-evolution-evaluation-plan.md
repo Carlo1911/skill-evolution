@@ -9,6 +9,26 @@ product_contract_source: ce-brainstorm
 execution: code
 ---
 
+> **Status as of 2026-07-26 — the checkboxes below were never maintained.** Do not read
+> them as the state of the work: most of what they describe shipped, and a few items
+> deliberately did not. Verified against code in
+> [`../pending-work-2026-07-26.md`](../pending-work-2026-07-26.md).
+>
+> **Shipped:** the evaluator registry and all three v1 evaluators, the gate and its
+> strictness resolution, the provider adapter layer (Claude, Ollama and — beyond this plan —
+> OpenCode Zen), append-only versioned history with retention pruning, redaction at both the
+> provider and on-disk points, fail-closed error handling (R21), and the `.gitignore` fix
+> (R17). Also beyond this plan: a shrink floor, cumulative drift limits, regex-based secret
+> detection, and PII masking.
+>
+> **Not shipped, deliberately:** R3's human-in-the-loop evaluator (no trigger scenario yet),
+> R5's proposal-quality / tool-call-quality / analyzer-prompt-quality targets (so KD2's
+> shared-core generalization claim remains unverified), R7's first-party OpenAI and Gemini
+> branches, R14's multi-round Pareto iteration, R16's cron migration (done differently — see
+> the backlog's P0-1), and R22's archive/compaction path (`prune_history()` deletes only, and
+> is CLI-invoked rather than automatic).
+
+
 # Skill Evolution Evaluation Framework - Plan
 
 ## Goal Capsule

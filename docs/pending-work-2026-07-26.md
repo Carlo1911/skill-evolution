@@ -279,7 +279,49 @@ optimizer to draft-time-only checking.
 
 ---
 
-## P2 — Documentation debt
+## ~~P2 — Documentation debt~~ — RESOLVED 2026-07-26
+
+All five closed. One turned out to be more than documentation debt:
+
+**A guardrail was documented that does not exist.** `SKILL.md` claimed, twice (under
+"Constraints & Guardrails" and again under "Safety"), that the pipeline only modifies
+`created_by: agent` skills and does not touch hub-installed ones. `grep` finds no such logic
+anywhere in `scripts/`. In a document written for other people to install, that could lead
+someone to enable auto-apply believing their hub skills were protected. Both claims are
+removed and replaced with the accurate statement: the gate does not distinguish hub-installed
+from agent-created skills, so scope it yourself if that matters.
+
+Also corrected while there: "Non-empty: evolved artifact must not be empty" described a check
+that does not exist as such — an empty body does fail, but on the frontmatter check, not an
+emptiness rule.
+
+- **P2-1** — `README.md` and `SKILL.md` said the optimizer needs `dspy`; it needs
+  `gepa==0.1.4`, and it is no longer "GEPA-lite" but a real `optimize_anything()` loop.
+  Both now show the actual CLI (`--list-candidates` / `--skill`) instead of a bare
+  invocation that does nothing, and note that the extra must go in the interpreter you run
+  it with.
+- **P2-2** — install URLs no longer read as fillable-looking placeholders; both say plainly
+  that this repo has no published remote yet. Publishing remains open (item 8).
+- **P2-3** — the `SKILL.md` env table went from 11 to 23 documented variables: the shrink
+  floor, both cumulative limits, the whole OpenCode provider group, `ANTHROPIC_API_KEY`,
+  `PROPOSALS_DIR`, and the three optimizer tunables. Also records that a malformed numeric
+  value falls back with a warning rather than raising.
+- **P2-4** — rather than mass-checking 36 stale boxes (not all of which are actually done),
+  each plan gained a dated status banner stating what shipped, what deliberately did not, and
+  which of its own assumptions have since been overtaken — pointing here for the verified
+  detail. `integration-plan.md`'s Fase 3 and 4 checkboxes were updated directly, since those
+  are specific enough to mark honestly.
+- **P2-5** — closed earlier with P0-3.
+
+**Corrected while auditing:** both files also still described auto-apply as something the
+analysis run does (`"Proposals with confidence ≥ 0.85 will be auto-applied"`, and an
+"Auto-apply? ✅" column on every proposal type). That contradicts the analyzer prompt's Rule 2
+and is no longer true of the deployment. Replaced with what `apply_proposal()` actually emits,
+and an explicit note that no automated step applies anything.
+
+<details><summary>Original findings</summary>
+
+### P2 — Documentation debt (original)
 
 Cheap, and it matters because `integration-plan.md` Fase 4 intends this repo to be
 installed by other people.
@@ -324,6 +366,8 @@ stale — it describes redaction as `SECRET_PATTERNS`-only, which stopped being 
 `SECRET_REGEXES` landed.
 
 ---
+
+</details>
 
 ## P3 — Backlog items, with status
 
@@ -401,7 +445,7 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 3. ~~**P0-2** — decide on PII.~~ **Done 2026-07-26**: identifiers masked, amounts kept,
    sign-off recorded.
 4. ~~**P1-1, P1-2** — close today's own two gaps.~~ **Done 2026-07-26.**
-5. **P2-1..P2-5** — documentation, batched. Cheap, and a prerequisite for item 8.
+5. ~~**P2-1..P2-5** — documentation, batched.~~ **Done 2026-07-26.**
 6. Then choose between **item 7** (multi-agent, highest owner interest) and **item 1**
    (evaluation coverage, unblocks the shared-core claim).
 

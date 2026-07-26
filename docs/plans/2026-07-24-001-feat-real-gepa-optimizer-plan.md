@@ -10,6 +10,26 @@ execution: code
 deepened: 2026-07-24
 ---
 
+> **Status as of 2026-07-26 — the checkboxes below were never maintained.** All nine
+> correspond to shipped code. Verified in
+> [`../pending-work-2026-07-26.md`](../pending-work-2026-07-26.md).
+>
+> Two things this plan could not have known. First, `_require_gepa()` as written could never
+> have run: it returned the top-level `gepa` package, but every symbol the call site needs
+> lives in the `gepa.optimize_anything` submodule, so the call raised `TypeError` and three
+> `AttributeError`s. Caught only by a contract test against the real package. Notably KTD4's
+> stated worry — that `reflection_lm`/config *parameter names* might drift — proved
+> unfounded; the real drift was module/function shadowing.
+>
+> Second, **Risk 1 (no PII redaction on session excerpts crossing the provider boundary)
+> shipped without the explicit sign-off this plan required.** That sign-off is now recorded in
+> the backlog's P0-2: identifiers are masked, monetary amounts deliberately are not.
+>
+> The optimizer has since been run for real against `gepa==0.1.4` and real session history.
+> The objective now also carries the size budget the gate enforces, which this plan did not
+> anticipate needing.
+
+
 # Real GEPA Optimizer - Plan
 
 ## Goal Capsule

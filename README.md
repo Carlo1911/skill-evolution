@@ -10,7 +10,8 @@ Reads past sessions, analyzes them against loaded skills, generates structured p
 
 ```bash
 # Install the skill
-hermes skills install https://raw.githubusercontent.com/<your-user>/hermes-skill-evolution/main/SKILL.md
+# Replace <owner> with the account hosting your fork; this repo has no published remote yet.
+hermes skills install https://raw.githubusercontent.com/<owner>/hermes-skill-evolution/main/SKILL.md
 
 # Load it
 hermes -s hermes-skill-evolution
@@ -23,7 +24,7 @@ The agent will:
 1. Fetch unprocessed sessions from `~/.hermes/state.db`
 2. Scan your installed skills
 3. Analyze each session for coverage gaps
-4. Generate proposal files in `proposals/`
+4. Generate proposal files in `docs/skill-evolution/proposals/`
 5. Deliver a summary
 
 ## Auto-Apply (Opt-In)
@@ -61,7 +62,7 @@ hermes-skill-evolution/
 │   ├── analyze.py              # Format sessions for LLM
 │   ├── proposal.py             # Proposal schema, I/O, apply logic
 │   ├── evaluate.py             # Evaluation gate (deterministic + LLM-judge + regression)
-│   ├── optimize_skill.py       # Optional GEPA-lite optimizer (needs `dspy`)
+│   ├── optimize_skill.py       # Optional GEPA optimizer (needs the `gepa` extra)
 │   ├── state.py                # Track processed sessions
 │   └── skill-evolution-fetch.sh # Cron wrapper
 ├── tests/                      # pytest suite (one file per evaluator/feature area)
@@ -83,23 +84,35 @@ flowchart LR
     E -->|No| I[Archive]
 ```
 
-Proposals with confidence above threshold still have to pass the evaluation gate — a deterministic size/growth/YAML check, an LLM-judge rubric score, and a regression check against that target's own history — before `skill_manage` is ever called. See `SKILL.md` for the details and `SKILL_EVOLUTION_*` environment variables.
+Proposals with confidence above threshold still have to pass the evaluation gate — deterministic size checks (absolute cap, per-pass growth *and* shrink, plus cumulative drift measured against where the skill started), an LLM-judge rubric score, and a regression check against that target's own history — before `skill_manage` is ever called.
 
-## Optional: GEPA-lite Optimizer
+Note that **no automated step applies a proposal.** The analysis run writes proposals and stops; the analyzer prompt forbids it from calling `skill_manage` whatever the confidence. `apply_proposal()` is invoked by a human, or by a step you write. See `SKILL.md` for the details and `SKILL_EVOLUTION_*` environment variables.
+
+## Optional: GEPA Optimizer
 
 ```bash
-pip install -e ".[optimizer]"
+pip install -e ".[optimizer]"          # installs gepa==0.1.4
 export SKILL_EVOLUTION_OPTIMIZER_ENABLED=true
-python3 scripts/optimize_skill.py
+
+# Read-only: which targets scored badly enough to be worth optimizing?
+python3 scripts/optimize_skill.py --list-candidates
+
+# Run a real gepa.optimize_anything() loop over one skill's session history
+python3 scripts/optimize_skill.py --skill <name> [--iterations N]
 ```
 
-Scans the evaluation history for low-scoring targets and drafts `improve_existing` proposals for them — through the same review/evaluation gate as any other proposal, never auto-applied directly.
+`--skill` seeds GEPA with the skill's installed `SKILL.md`, scores candidates against that
+skill's own recorded sessions, and drafts an `improve_existing` proposal from the winner —
+through the same review/evaluation gate as any other proposal, never applied directly.
+
+Use the interpreter you installed the extra into: `gepa` is not needed by the rest of the
+pipeline, so a bare `python3` without it fails fast with an actionable message.
 
 ## Dependencies
 
 - Python 3.10+
 - Hermes Agent (any version)
-- No pip packages required for the core pipeline; `dspy` is an optional extra for `optimize_skill.py` (`pip install -e ".[optimizer]"`)
+- No pip packages required for the core pipeline; `gepa==0.1.4` (**not** `dspy`) is an optional extra for `optimize_skill.py` (`pip install -e ".[optimizer]"`)
 
 ## License
 

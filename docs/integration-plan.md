@@ -268,12 +268,13 @@ hermes config set skills.evolution.min_confidence 0.85
 - [ ] skill_quality.py produce reportes
 - [ ] Cron semanal de calidad funcionando
 
-### Fase 3
-- [ ] optimize_skill.py corre con DSPy instalado
-- [ ] GEPA genera propuestas válidas
-- [ ] Sin break en pipeline actual sin DSPy
+### Fase 3 ✅ (con `gepa`, no DSPy)
+- [x] optimize_skill.py corre — con el paquete `gepa==0.1.4`, no DSPy; el extra `dspy` se eliminó
+- [x] GEPA genera propuestas válidas — verificado en 3 runs reales sobre historial de sesiones
+- [x] Sin break en el pipeline sin el extra: `_require_gepa()` falla con mensaje accionable
 
-### Fase 4
-- [ ] SKILL.md publicado en GitHub
-- [ ] README con instrucciones claras
-- [ ] Scripts auto-contenidos (sin depender de ai-memory-stack)
+### Fase 4 (parcial)
+- [ ] SKILL.md publicado en GitHub — **el repo no tiene remoto configurado todavía**
+- [x] README con instrucciones claras — corregido 2026-07-26 (decía instalar `dspy`)
+- [x] Scripts auto-contenidos (sin depender de ai-memory-stack) — producción ya ejecuta este
+      repo vía symlink; las copias en ai-memory-stack quedaron marcadas como obsoletas
