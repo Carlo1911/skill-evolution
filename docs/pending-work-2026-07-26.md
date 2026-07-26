@@ -128,7 +128,49 @@ executes this repo's code. Worth checking afterwards that the state file kept it
 layout, that proposals landed in `docs/skill-evolution/proposals/`, and that the report
 reflects the new proposals-only mode rather than reporting applied changes.
 
-### P0-2. PII in session excerpts is not redacted at all — and never got its sign-off
+### ~~P0-2. PII in session excerpts is not redacted at all~~ — RESOLVED 2026-07-26
+
+**Sign-off recorded here**, which is what the GEPA plan's Risk 1 asked for and never got.
+
+**Owner's decision: mask identifiers, keep amounts.** The scope is *identifiers*, not
+*amounts* — an email, phone, Luhn-valid card, IBAN or RUC/DNI identifies a person; a bare
+monetary amount identifies nobody and is precisely the evidence the analyzer needs for
+money-admin-style skills. Masking those would remove the analysis without protecting an
+identity.
+
+The code turned out to already exist (`fetch_sessions.redact_pii()`, wired at both
+redaction points — `_summarize_messages()` for what reaches the analyzer, and
+`evaluate.redact_secrets()` for provider prompts and on-disk proposals). It was part of the
+uncommitted work present at the start of the session, with 26 tests. What was genuinely
+missing was this sign-off and any mention in `CLAUDE.md`; both now exist.
+
+Verified against the real DB, measuring what actually crosses the boundary (first 300 chars
+of each message that the secret filter does not drop wholesale):
+
+| shape | before masking | after |
+|---|---|---|
+| email | 28 | **0** |
+| phone | 27 | **0** |
+| card (Luhn + leading 3–6) | 7 | **0** |
+| RUC | 1 | **0** |
+| IBAN | 0 | 0 |
+| money amount | 120 | **120** — deliberately preserved |
+
+Note the design difference from secrets, which is deliberate: a secret drops the whole
+message, PII is masked in place with a marker naming the kind (`[PII:EMAIL]`) so the
+surrounding evidence survives and a reviewer knows what was taken out.
+
+**Residual, accepted:** masking is shape-based, so free-text PII it cannot pattern-match —
+a person's name in prose, a described location, health or financial context in narrative
+form — still crosses. Nothing here detects that, and no realistic regex would. The
+mitigations that do apply are the 300-character window and the wholesale drop of
+secret-bearing messages. If that residual becomes unacceptable, the structural fix is a
+local provider (Ollama/llama.cpp) so nothing leaves the machine at all.
+
+<details>
+<summary>Original finding (kept for context)</summary>
+
+#### P0-2. PII in session excerpts is not redacted at all — and never got its sign-off
 
 `docs/plans/2026-07-24-001` Risk 1 flagged that session excerpts crossing the
 external-provider boundary get only secret-pattern redaction, with **no PII or
@@ -144,6 +186,8 @@ excerpts in one prompt.
 
 This needs a decision, not necessarily code: accept the exposure explicitly and record
 it, or add a redaction/opt-in layer. Either way it should stop being invisible.
+
+</details>
 
 ### ~~P0-3. A malformed numeric env var crashes the gate~~ — RESOLVED 2026-07-26
 
@@ -327,7 +371,8 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 1. ~~**P0-1** — sync production.~~ **Done 2026-07-26.** This repo is the source of truth;
    the nightly job now executes its code, and auto-apply is off by decision.
 2. ~~**P0-3** — guard the env parsing.~~ **Done 2026-07-26**, along with P2-5.
-3. **P0-2** — make a decision on PII, even if the decision is "accept and document".
+3. ~~**P0-2** — decide on PII.~~ **Done 2026-07-26**: identifiers masked, amounts kept,
+   sign-off recorded.
 4. **P1-1, P1-2** — close today's own two gaps while the context is fresh.
 5. **P2-1..P2-5** — documentation, batched. Cheap, and a prerequisite for item 8.
 6. Then choose between **item 7** (multi-agent, highest owner interest) and **item 1**

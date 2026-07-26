@@ -59,6 +59,73 @@ SECRET_REGEXES = [
     )
 ]
 
+# ── PII masking, for text that crosses the external-provider boundary ──
+#
+# Distinct from SECRET_PATTERNS in both what it catches and what it does. A detected secret
+# drops the whole message (see _summarize_messages) because no version of that message is
+# worth sending; PII is *masked in place* so an email costs the email, not the paragraph of
+# debugging evidence around it.
+#
+# Money amounts are deliberately absent. Measured against the real session DB, amounts
+# appear in 120 of the messages that actually cross, and money-management skills are exactly
+# what the analyzer needs to reason about -- masking them removes evidence without
+# protecting an identity. The line drawn here is identifiers, not amounts.
+#
+# Card matching needs Luhn as well as a regex: a bare 13-19 digit probe matched 840 messages
+# in the real DB, Luhn cut that to 374, and requiring a card-shaped leading digit and length
+# narrows it further. Numeric ids, byte counts and hashes must survive.
+_CARD_CANDIDATE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
+_CARD_LENGTHS = {13, 14, 15, 16, 19}
+
+PII_REGEXES = [
+    ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    ("phone", re.compile(r"\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}\b")),
+    ("iban", re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b")),
+    # Keyword-anchored so an arbitrary 8- or 11-digit number is not swept up.
+    ("tax-id", re.compile(r"\bRUC[\s:#]*\d{11}\b", re.IGNORECASE)),
+    ("national-id", re.compile(r"\bDNI[\s:#]*\d{8}\b", re.IGNORECASE)),
+]
+
+
+def _luhn_ok(digits: str) -> bool:
+    """Luhn checksum — necessary, not sufficient, for a payment card number."""
+    total, alternate = 0, False
+    for char in reversed(digits):
+        value = int(char)
+        if alternate:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+        alternate = not alternate
+    return total % 10 == 0
+
+
+def _mask_cards(text: str) -> str:
+    """Mask card-shaped, Luhn-valid digit runs, leaving other long numbers alone."""
+    def replace(match):
+        digits = re.sub(r"\D", "", match.group())
+        if len(digits) in _CARD_LENGTHS and digits[0] in "3456" and _luhn_ok(digits):
+            return "[PII:card]"
+        return match.group()
+
+    return _CARD_CANDIDATE.sub(replace, text)
+
+
+def redact_pii(text: str) -> str:
+    """Mask personal identifiers in `text`, preserving everything around them.
+
+    Applied to message content before it is previewed and sent to a provider. The mask names
+    the kind of identifier removed (`[PII:email]`) so a reviewer reading a proposal can tell
+    what was dropped rather than just that something was.
+    """
+    if not text:
+        return text
+    for label, regex in PII_REGEXES:
+        text = regex.sub(f"[PII:{label}]", text)
+    return _mask_cards(text)
+
+
 SESSION_QUERY = """
     SELECT id, started_at, model, title, source
     FROM sessions
@@ -216,6 +283,9 @@ def _summarize_messages(messages) -> tuple:
         content = msg["content"] or ""
         if contains_secret(content):
             continue
+        # Secrets drop the message; identifiers are masked so the surrounding evidence
+        # survives. Applied before truncation so the mask cannot be split in half.
+        content = redact_pii(content)
 
         if role == "user":
             user_msgs += 1

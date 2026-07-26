@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-from fetch_sessions import contains_secret, env_float, env_int
+from fetch_sessions import contains_secret, env_float, env_int, redact_pii
 from skill_index import parse_name_description_frontmatter
 
 # When run directly (python3 scripts/evaluate.py), this module loads as
@@ -265,15 +265,23 @@ class ProviderError(RuntimeError):
 
 
 def redact_secrets(text: str) -> str:
-    """Redact any line matching a SECRET_PATTERNS entry before it leaves the machine.
+    """Redact secrets and mask personal identifiers before `text` leaves the machine.
 
-    Mirrors fetch_sessions.py's contains_secret() gate: the whole line is replaced,
-    not just the matched marker substring -- an in-place substring replace only masks
-    the recognizable prefix (e.g. "sk-ant-api") and leaves the rest of the actual
-    secret value intact.
+    Two different treatments, because the right response differs:
+
+    - A line containing a **secret** is replaced whole, not just at the matched marker: an
+      in-place substring replace masks the recognizable prefix (e.g. "sk-ant-api") and
+      leaves the rest of the live credential intact. Mirrors fetch_sessions.contains_secret.
+    - **Personal identifiers** are masked in place by redact_pii(), so a surviving line keeps
+      the evidence around the identifier. Money amounts are deliberately not masked -- see
+      the PII_REGEXES comment in fetch_sessions.py for why identifiers and amounts are
+      treated differently.
+
+    This is the provider-egress point; fetch_sessions applies the same two rules to session
+    content, and save_proposal() applies this function before anything reaches disk.
     """
     return "\n".join(
-        REDACTED_PLACEHOLDER if contains_secret(line) else line
+        REDACTED_PLACEHOLDER if contains_secret(line) else redact_pii(line)
         for line in text.split("\n")
     )
 
