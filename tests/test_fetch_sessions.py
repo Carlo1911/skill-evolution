@@ -7,13 +7,11 @@ fetch_sessions() crashed on any session that had at least one message. Fixed
 by extracting the shared `_summarize_messages()` helper (also used by
 sessions_for_skill()), which uses bracket access throughout.
 
-The fixture schema here intentionally matches fetch_sessions()'s own
-SESSION_QUERY/MESSAGE_QUERY column names (`created_at`, `total_tokens`) --
-NOT the live ~/.hermes/state.db schema (`started_at`, no `total_tokens`),
-which those queries do not actually match. That schema/query mismatch is a
-separate, pre-existing bug outside this fix's scope (see
-sessions_for_skill()'s own SKILL_SESSION_QUERY/SKILL_MESSAGE_QUERY, which
-were deliberately written against the real live column names instead).
+The fixture schema here matches the live ~/.hermes/state.db schema
+(`sessions.started_at`, no `sessions.total_tokens`; `messages.timestamp`, no
+`messages.created_at`) -- see sessions_for_skill()'s own
+SKILL_SESSION_QUERY/SKILL_MESSAGE_QUERY, which were already written against
+these same live column names.
 """
 
 import os
@@ -35,8 +33,7 @@ def _make_db(path):
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
             model TEXT,
-            created_at REAL NOT NULL,
-            total_tokens INTEGER,
+            started_at REAL NOT NULL,
             title TEXT
         );
         CREATE TABLE messages (
@@ -44,7 +41,7 @@ def _make_db(path):
             session_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT,
-            created_at REAL NOT NULL
+            timestamp REAL NOT NULL
         );
         """
     )
@@ -64,15 +61,15 @@ def test_fetch_sessions_with_messages_does_not_crash(db_path):
     """Regression: previously raised AttributeError on any session with messages."""
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO sessions (id, source, model, created_at, total_tokens, title) VALUES (?, ?, ?, ?, ?, ?)",
-        ("sess-1", "claude-code", "claude", 1000.0, 42, "a session"),
+        "INSERT INTO sessions (id, source, model, started_at, title) VALUES (?, ?, ?, ?, ?)",
+        ("sess-1", "claude-code", "claude", 1000.0, "a session"),
     )
     conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
         ("sess-1", "user", "hello there", 1000.0),
     )
     conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
         ("sess-1", "assistant", "hi, how can I help?", 1001.0),
     )
     conn.commit()
@@ -82,6 +79,8 @@ def test_fetch_sessions_with_messages_does_not_crash(db_path):
 
     assert len(results) == 1
     assert results[0]["session_id"] == "sess-1"
+    assert results[0]["started_at"] == 1000.0
+    assert "total_tokens" not in results[0]
     assert results[0]["user_messages"] == 1
     assert results[0]["assistant_messages"] == 1
     contents = [m["content_preview"] for m in results[0]["messages"]]
@@ -92,11 +91,11 @@ def test_fetch_sessions_with_messages_does_not_crash(db_path):
 def test_fetch_sessions_redacts_secret_in_message(db_path):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO sessions (id, source, model, created_at, total_tokens, title) VALUES (?, ?, ?, ?, ?, ?)",
-        ("sess-secret", "claude-code", "claude", 1000.0, 10, "t"),
+        "INSERT INTO sessions (id, source, model, started_at, title) VALUES (?, ?, ?, ?, ?)",
+        ("sess-secret", "claude-code", "claude", 1000.0, "t"),
     )
     conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
         ("sess-secret", "user", "here is my key sk-ant-api03-abc123", 1000.0),
     )
     conn.commit()
@@ -105,3 +104,29 @@ def test_fetch_sessions_redacts_secret_in_message(db_path):
     results = fetch_sessions.fetch_sessions(db_path=db_path, lookback_hours=999999, dry_run=True)
 
     assert results[0]["messages"] == []
+
+
+def test_fetch_sessions_filters_by_lookback_window(db_path):
+    """R2: a session whose started_at is outside --lookback-hours is excluded;
+    one inside the window is included."""
+    import time
+
+    now = time.time()
+    conn = sqlite3.connect(db_path)
+    # Well outside a 48-hour lookback window (10 days ago).
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, title) VALUES (?, ?, ?, ?, ?)",
+        ("sess-old", "claude-code", "claude", now - (10 * 24 * 3600), "old session"),
+    )
+    # Well inside a 48-hour lookback window (1 hour ago).
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, title) VALUES (?, ?, ?, ?, ?)",
+        ("sess-recent", "claude-code", "claude", now - 3600, "recent session"),
+    )
+    conn.commit()
+    conn.close()
+
+    results = fetch_sessions.fetch_sessions(db_path=db_path, lookback_hours=48, dry_run=True)
+
+    session_ids = {r["session_id"] for r in results}
+    assert session_ids == {"sess-recent"}

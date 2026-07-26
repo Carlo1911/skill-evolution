@@ -31,15 +31,15 @@ SECRET_PATTERNS = [
 ]
 
 SESSION_QUERY = """
-    SELECT id, created_at, model, title, source, total_tokens
+    SELECT id, started_at, model, title, source
     FROM sessions
     WHERE source != 'cron'
-    ORDER BY created_at DESC
+    ORDER BY started_at DESC
     LIMIT ?
 """
 
 MESSAGE_QUERY = """
-    SELECT role, content, created_at
+    SELECT role, content, timestamp
     FROM messages
     WHERE session_id = ?
     ORDER BY id ASC
@@ -133,14 +133,14 @@ def fetch_sessions(
         if session_id in processed:
             continue
 
-        created_at = session["created_at"]
-        if isinstance(created_at, str):
+        started_at = session["started_at"]
+        if isinstance(started_at, str):
             try:
-                ts = datetime.fromisoformat(created_at).timestamp()
+                ts = datetime.fromisoformat(started_at).timestamp()
             except ValueError:
                 ts = 0
         else:
-            ts = created_at or 0
+            ts = started_at or 0
 
         if ts < cutoff:
             continue
@@ -148,7 +148,6 @@ def fetch_sessions(
         title = session["title"] or ""
         model = session["model"] or ""
         source = session["source"] or ""
-        total_tokens = session["total_tokens"] or 0
 
         # Fetch messages
         messages = conn.execute(MESSAGE_QUERY, (session_id,)).fetchall()
@@ -156,11 +155,10 @@ def fetch_sessions(
 
         results.append({
             "session_id": session_id,
-            "created_at": created_at,
+            "started_at": started_at,
             "title": title,
             "model": model,
             "source": source,
-            "total_tokens": total_tokens,
             "message_count": len(messages),
             "user_messages": user_msgs,
             "assistant_messages": asst_msgs,
