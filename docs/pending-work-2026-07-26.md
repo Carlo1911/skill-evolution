@@ -379,12 +379,12 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 | 2 | **Provider coverage expansion** (R7) | **Partial.** `claude`, `ollama`, `opencode`. OpenCode Zen is OpenAI-compatible so it reaches MiniMax/Kimi/GLM/DeepSeek/Qwen by proxy — most of R7's named targets. Missing: first-party OpenAI and Gemini branches. |
 | 3 | **Human-in-the-loop evaluator** (R3) | **Not started**, deferred pending a trigger scenario. None has appeared. |
 | 4 | **Skill quality tracking** (`dataset_builder.py`, `skill_quality.py` — integration-plan Fase 2) | **Not started.** Neither file exists. No longer blocks anything: the optimizer uses real sessions as its trainset. |
-| 5 | **Production cron** | **Superseded by P0-1** — the cron already points here; its *scripts* do not. |
+| 5 | ~~**Production cron**~~ | **Closed** — superseded by P0-1 and done. The cron already pointed here; its *scripts* now do too. |
 | 6 | **Heavier evaluation techniques** — pairwise/win-rate, debate/ensemble, execution re-run, embedding similarity, fine-tuned judges | **Not started**, deliberately deferred. Not reconsidered. |
 | 7 | **Host-agnostic / multi-agent support** (Codex, Claude Code, …) | **Mapped, not started.** Four coupling seams, each isolated in one module. Owner's principle: the more agnostic, the better. Read side generalizes cheaply; the write side needs a per-host apply strategy since no host outside Hermes exposes `skill_manage`. |
-| 8 | **Community-skill publication** (integration-plan Fase 4) | **Not started.** Needs P2-1/P2-2/P2-3 plus a git remote. Overlaps P0-1: Fase 4's "self-contained, no ai-memory-stack dependency" is the same requirement. |
+| 8 | **Community-skill publication** (integration-plan Fase 4) | **Unblocked, one step left.** Its three doc prerequisites (P2-1/P2-2/P2-3) are done, and Fase 4's "self-contained, no ai-memory-stack dependency" was satisfied by P0-1. What remains is **a git remote** — the repo has none, so nothing can be installed from a URL. That is an owner decision (where to host, public or private). |
 
-### Smaller open items
+### Smaller open items (11)
 
 - **Optimizer defaults untuned.** `MIN_SESSIONS=3`, `DEFAULT_MAX_METRIC_CALLS=20`,
   `DEFAULT_MAX_SESSIONS_FOR_SKILL=20` are env-configurable but never tuned against usage.
