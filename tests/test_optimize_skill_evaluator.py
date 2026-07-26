@@ -91,6 +91,20 @@ def test_prompt_framing_delimits_session_content_with_unpredictable_boundary():
     assert framing_marker in prompt[:start]
 
 
+def test_prompt_instructs_judge_against_verbatim_session_quotes_in_feedback():
+    """R3: the judge must be told to write `feedback` in its own words, never a verbatim
+    quote of session content -- reduces (doesn't eliminate) the one channel through which
+    session-derived text reaches gepa's own internal reflection prompt. A unit test can't
+    compel actual model compliance, so this asserts the instruction text itself is present
+    as a deterministic proxy."""
+    sessions = _sample_sessions()
+    prompt = optimize_skill._build_gepa_prompt("candidate body", sessions)
+
+    lowered = prompt.lower()
+    assert "own words" in lowered
+    assert "verbatim" in lowered or "never quote" in lowered
+
+
 def test_prompt_boundary_is_unpredictable_per_call():
     sessions = _sample_sessions()
     prompt_a = optimize_skill._build_gepa_prompt("candidate body", sessions)
