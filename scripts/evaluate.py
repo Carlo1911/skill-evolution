@@ -260,6 +260,9 @@ def resolve_provider(provider: Optional[str] = None, evaluator_name: Optional[st
     return os.environ.get(PROVIDER_ENV_VAR, DEFAULT_PROVIDER)
 
 
+USER_AGENT = "hermes-skill-evolution/0.1"
+
+
 def _post_json(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: int, provider_label: str) -> Dict[str, Any]:
     """POST a JSON body via urllib and return the decoded JSON response.
 
@@ -269,7 +272,11 @@ def _post_json(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout:
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"content-type": "application/json", **headers},
+        # Identify the client by project name: urllib's default ("Python-urllib/x.y") is
+        # blanket-blocked by some gateways -- OpenCode Zen answers 403 for it and 200 for
+        # the byte-identical request under any descriptive UA. `headers` wins, so a caller
+        # can still override it.
+        headers={"content-type": "application/json", "user-agent": USER_AGENT, **headers},
         method="POST",
     )
     try:
@@ -309,9 +316,50 @@ def _call_ollama(prompt: str, timeout: int = 60) -> str:
         raise ProviderError(f"Unexpected Ollama/llama.cpp response shape: {payload}") from e
 
 
+OPENCODE_BASE_URL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_BASE_URL"
+OPENCODE_MODEL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_MODEL"
+OPENCODE_API_KEY_ENV_VAR = "OPENCODE_API_KEY"
+DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
+DEFAULT_OPENCODE_MODEL = "big-pickle"
+
+
+def _call_opencode(prompt: str, timeout: int = 60) -> str:
+    """Call OpenCode Zen, an OpenAI-compatible hosted gateway.
+
+    Two catalogues exist and they are not interchangeable: Zen
+    (`https://opencode.ai/zen/v1`, the default here) carries `big-pickle` and the
+    `*-free` variants, while the Go subscription tier (`https://opencode.ai/zen/go/v1`)
+    exposes a different, smaller list without `big-pickle`. Point
+    SKILL_EVOLUTION_OPENCODE_BASE_URL at the tier whose model id you set.
+
+    Unlike the Ollama caller this reaches a third party, so a missing key fails closed
+    with an actionable message rather than sending an unauthenticated request.
+    """
+    api_key = os.environ.get(OPENCODE_API_KEY_ENV_VAR, "")
+    if not api_key:
+        raise ProviderError(
+            f"OpenCode provider selected but {OPENCODE_API_KEY_ENV_VAR} is not set. "
+            f"Export it (do not commit it) before running evaluators against OpenCode."
+        )
+
+    base_url = os.environ.get(OPENCODE_BASE_URL_ENV_VAR, DEFAULT_OPENCODE_BASE_URL)
+    model = os.environ.get(OPENCODE_MODEL_ENV_VAR, DEFAULT_OPENCODE_MODEL)
+    payload = _post_json(
+        f"{base_url.rstrip('/')}/chat/completions",
+        {"model": model, "messages": [{"role": "user", "content": prompt}]},
+        {"authorization": f"Bearer {api_key}"},
+        timeout, "OpenCode Zen",
+    )
+    try:
+        return payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ProviderError(f"Unexpected OpenCode Zen response shape: {payload}") from e
+
+
 PROVIDER_CALLERS = {
     "claude": _call_claude,
     "ollama": _call_ollama,
+    "opencode": _call_opencode,
 }
 
 
@@ -651,10 +699,12 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
 
     content = None
     content_kind = "body"
+    baseline = None
     for change in getattr(proposal, "proposed_changes", []):
         if getattr(change, "field", None) in ("body", "description") and getattr(change, "new_value", None):
             content = change.new_value
             content_kind = change.field
+            baseline = getattr(change, "old_value", None)
             break
     if content is None:
         summary = getattr(proposal, "summary", "")
@@ -662,7 +712,16 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
         content = f"{summary}\n\n{rationale}"
         content_kind = "summary_rationale"
 
-    return run_evaluators(content, target, context={"content_kind": content_kind})
+    context = {"content_kind": content_kind}
+    # DeterministicEvaluator's growth-vs-baseline guard is inert unless it gets
+    # baseline_size, so a change replacing existing text must carry the size of the text
+    # it replaces. Measured the same way the evaluator measures the candidate (utf-8
+    # bytes). create_new has no old_value: the key stays absent and the guard stays inert
+    # rather than dividing by a zero baseline.
+    if baseline:
+        context["baseline_size"] = len(baseline.encode("utf-8"))
+
+    return run_evaluators(content, target, context=context)
 
 
 def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None) -> Tuple[List[EvalResult], EvalResult, bool]:

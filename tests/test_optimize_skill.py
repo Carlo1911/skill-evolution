@@ -429,8 +429,11 @@ def test_require_gepa_missing_dependency_gives_clear_actionable_message(monkeypa
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name == "gepa":
-            raise ImportError("No module named 'gepa'")
+        # Match the package and any submodule of it: _require_gepa() imports
+        # `gepa.optimize_anything`, so keying on the bare name "gepa" would let the
+        # real (installed) package through and never exercise the error path.
+        if name == "gepa" or name.startswith("gepa."):
+            raise ImportError(f"No module named {name!r}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)

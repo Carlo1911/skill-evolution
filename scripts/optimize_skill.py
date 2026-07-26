@@ -178,10 +178,19 @@ def score_candidate(candidate: str, sessions: List[Dict[str, Any]],
 
 
 def _require_gepa():
-    """Import the optional `gepa` dependency, raising a clear, actionable error if absent."""
+    """Import the optional `gepa` dependency, raising a clear, actionable error if absent.
+
+    Returns the `gepa.optimize_anything` *submodule*, not the top-level `gepa` package:
+    that submodule is the namespace holding every symbol this script needs
+    (`optimize_anything` the function, plus `GEPAConfig`/`EngineConfig`/`ReflectionConfig`).
+    The top-level package intentionally binds the name `optimize_anything` to the
+    submodule itself -- see gepa/__init__.py, "expose submodule; use
+    `from gepa.optimize_anything import optimize_anything` for the function" -- so reading
+    these names off the package yields a non-callable module and three AttributeErrors.
+    """
     try:
-        import gepa
-        return gepa
+        import gepa.optimize_anything as gepa_api
+        return gepa_api
     except ImportError as e:
         raise RuntimeError(
             "The optional optimizer dependency 'gepa' is not installed. "
@@ -278,17 +287,17 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
             session_count=len(sessions),
         )
 
-    gepa = _require_gepa()
+    gepa_api = _require_gepa()
     bound_evaluator = functools.partial(score_candidate, sessions=sessions)
     max_metric_calls = (
         iterations if iterations is not None
         else int(os.environ.get(MAX_METRIC_CALLS_ENV_VAR, DEFAULT_MAX_METRIC_CALLS))
     )
-    config = gepa.GEPAConfig(
-        engine=gepa.EngineConfig(max_metric_calls=max_metric_calls),
-        reflection=gepa.ReflectionConfig(reflection_lm=_reflection_lm_adapter),
+    config = gepa_api.GEPAConfig(
+        engine=gepa_api.EngineConfig(max_metric_calls=max_metric_calls),
+        reflection=gepa_api.ReflectionConfig(reflection_lm=_reflection_lm_adapter),
     )
-    return gepa.optimize_anything(
+    return gepa_api.optimize_anything(
         seed_candidate=seed_body,
         evaluator=bound_evaluator,
         objective=(
@@ -358,10 +367,13 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     evaluate.DeterministicEvaluator's structural checks (size, growth-vs-baseline, valid
     YAML frontmatter) so a structurally broken candidate is rejected before it ever
     becomes a proposal a human has to catch on review (R4). Size and frontmatter mirror
-    what apply_proposal() already checks on approval; growth-vs-baseline does not -- that
-    branch is gated on a `baseline_size` context key apply_proposal()'s own gate
-    (evaluate_skill_text()) never populates, so this is the only place growth is actually
-    enforced today. Raises ValueError, carrying the evaluator's feedback text, when the
+    what apply_proposal() already checks on approval. Growth-vs-baseline is now enforced
+    in both places: evaluate_skill_text() populates `baseline_size` from the change's
+    old_value, while this function re-resolves it from the skill's installed SKILL.md via
+    _resolve_baseline_size_bytes() -- so a runaway candidate is caught here at draft time
+    rather than only at approval. (Before that fix, evaluate_skill_text() never populated
+    the key and this was the only place growth was checked at all.)
+    Raises ValueError, carrying the evaluator's feedback text, when the
     candidate fails; no SkillEvolutionProposal is constructed in that case. The
     growth-vs-baseline comparison re-resolves the skill's currently installed SKILL.md
     size via _resolve_baseline_size_bytes(); when that skill can't be resolved, the

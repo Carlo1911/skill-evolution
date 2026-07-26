@@ -49,6 +49,14 @@ def scan_skills(skills_dir: str = SKILLS_DIR) -> list:
         if not category_dir.is_dir():
             continue
 
+        # Dot-prefixed dirs are internal, not live skill categories: `.archive/` holds
+        # retired skills, `.curator_backups/` timestamped snapshots, `.hub/` lockfiles
+        # and quarantine. Indexing them would tell the analyzer a retired skill still
+        # exists, and an archived twin of a live skill would make optimize_skill.py's
+        # duplicate-name check reject the live one as ambiguous.
+        if category_dir.name.startswith("."):
+            continue
+
         category = category_dir.name
 
         for skill_dir in sorted(category_dir.iterdir()):

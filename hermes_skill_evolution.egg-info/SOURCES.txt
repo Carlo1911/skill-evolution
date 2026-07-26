@@ -22,6 +22,10 @@ tests/test_evaluate_providers.py
 tests/test_evaluate_regression.py
 tests/test_evaluate_retroactive.py
 tests/test_evaluate_skill_text.py
+tests/test_fetch_sessions.py
+tests/test_fetch_sessions_for_skill.py
 tests/test_optimize_skill.py
+tests/test_optimize_skill_evaluator.py
+tests/test_proposal_frontmatter_roundtrip.py
 tests/test_proposal_gate.py
 tests/test_proposal_redaction.py

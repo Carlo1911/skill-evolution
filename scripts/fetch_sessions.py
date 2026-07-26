@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -28,6 +29,34 @@ SECRET_PATTERNS = [
     "ntn_", "AKIA", "-----BEGIN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
     "OPENROUTER_API_KEY", "SLACK_BOT_TOKEN", "GITHUB_TOKEN",
     "AWS_SECRET_ACCESS_KEY", "DATABASE_URL",
+]
+
+# Shape-based detection, because the fixed list above only matches secrets whose
+# vendor prefix or exact env-var name was known in advance. Scanning the real
+# ~/.hermes/state.db showed that gap is not theoretical: it missed 27 password
+# assignments, 23 generic *_TOKEN=/_SECRET=/_KEY= assignments, 6 generic `sk-` keys,
+# 5 `Authorization: Bearer` headers, and a credentialed database URI -- all of which
+# would have been forwarded to a provider verbatim.
+#
+# Length floors (20+ chars for opaque keys, 8+ for assigned values) keep ordinary
+# config off the list: MAX_TOKENS=1024 and DEBUG=true do not match. These run against
+# a single line at a time (see evaluate.redact_secrets), so anchoring is per line.
+SECRET_REGEXES = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\bsk-[A-Za-z0-9_-]{20,}",                      # OpenAI & compatible
+        r"\bsk_live_[A-Za-z0-9]{16,}",                   # Stripe live
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}",               # GitHub fine-grained
+        r"\bglpat-[A-Za-z0-9_-]{16,}",                   # GitLab
+        r"\bAIza[A-Za-z0-9_-]{30,}",                     # Google
+        r"\bxoxp-[A-Za-z0-9-]{10,}",                     # Slack user token
+        r"\bnpm_[A-Za-z0-9]{30,}",                       # npm
+        r"\bhf_[A-Za-z0-9]{30,}",                        # Hugging Face
+        r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}",  # JWT
+        r"authorization:\s*bearer\s+\S{16,}",            # auth header
+        r"\b[A-Z][A-Z0-9_]*_(?:TOKEN|SECRET|KEY|PASSWORD)\s*[:=]\s*\S{8,}",  # env assignment
+        r"\bpass(?:wd|word)\s*[:=]\s*\S{6,}",            # password assignment
+        r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^\s:@/]+:[^\s@/]+@",  # creds in URI
+    )
 ]
 
 SESSION_QUERY = """
@@ -71,9 +100,18 @@ def mark_processed(session_ids: List[str]) -> None:
 
 
 def contains_secret(text: str) -> bool:
-    """Check if text contains potential API keys or tokens."""
+    """Check if text contains potential API keys, tokens, passwords or credentialed URIs.
+
+    Two layers: the known-marker substrings in SECRET_PATTERNS, plus the shape-based
+    SECRET_REGEXES that catch secrets whose vendor prefix or env-var name wasn't known
+    in advance. Both redaction points depend on this predicate, so it must err toward
+    over-detection -- a false positive costs one redacted line of session evidence, a
+    false negative forwards a live credential to a third-party provider.
+    """
     text_lower = text.lower()
-    return any(pattern.lower() in text_lower for pattern in SECRET_PATTERNS)
+    if any(pattern.lower() in text_lower for pattern in SECRET_PATTERNS):
+        return True
+    return any(regex.search(text) for regex in SECRET_REGEXES)
 
 
 def _summarize_messages(messages) -> tuple:

@@ -108,6 +108,54 @@ def test_provider_selection_resolves_per_evaluator_through_call_provider(monkeyp
     assert calls == ["ollama"]
 
 
+def _capture_request(monkeypatch, response=b'{"ok": true}'):
+    """Capture the urllib Request _post_json builds, without any network access."""
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return response
+
+    def fake_urlopen(req, timeout=None):
+        captured["request"] = req
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(evaluate.urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def test_post_json_sends_a_descriptive_user_agent(monkeypatch):
+    """urllib's default UA ("Python-urllib/x.y") is blanket-blocked by some gateways.
+
+    OpenCode Zen returns 403 for it while returning 200 for the identical request under
+    any descriptive UA, so the client must identify itself by project name.
+    """
+    captured = _capture_request(monkeypatch)
+
+    evaluate._post_json("https://example.invalid/v1/chat/completions",
+                        {"model": "m"}, {}, 30, "Test")
+
+    ua = captured["request"].get_header("User-agent") or ""
+    assert "Python-urllib" not in ua
+    assert "hermes-skill-evolution" in ua
+
+
+def test_post_json_lets_callers_override_the_user_agent(monkeypatch):
+    captured = _capture_request(monkeypatch)
+
+    evaluate._post_json("https://example.invalid/v1/chat/completions",
+                        {"model": "m"}, {"user-agent": "custom/1.0"}, 30, "Test")
+
+    assert captured["request"].get_header("User-agent") == "custom/1.0"
+
+
 def test_unknown_provider_raises_clear_error():
     with pytest.raises(ProviderError, match="Unknown provider 'bogus'"):
         call_provider("hi", provider="bogus")

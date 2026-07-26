@@ -9,10 +9,8 @@ Description-Content-Type: text/markdown
 License-File: LICENSE
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"
-Provides-Extra: dspy
-Requires-Dist: dspy>=3.0.0; extra == "dspy"
 Provides-Extra: optimizer
-Requires-Dist: dspy>=3.0.0; extra == "optimizer"
+Requires-Dist: gepa==0.1.4; extra == "optimizer"
 Dynamic: license-file
 
 # Hermes Skill Evolution
@@ -77,11 +75,13 @@ hermes-skill-evolution/
 │   ├── skill_index.py          # Scan skills → JSON index
 │   ├── analyze.py              # Format sessions for LLM
 │   ├── proposal.py             # Proposal schema, I/O, apply logic
+│   ├── evaluate.py             # Evaluation gate (deterministic + LLM-judge + regression)
+│   ├── optimize_skill.py       # Optional GEPA-lite optimizer (needs `dspy`)
 │   ├── state.py                # Track processed sessions
 │   └── skill-evolution-fetch.sh # Cron wrapper
-├── proposals/                  # Generated proposal files
-├── docs/                       # Documentation
-└── reports/                    # Quality reports
+├── tests/                      # pytest suite (one file per evaluator/feature area)
+├── docs/                       # Documentation, proposals/, and eval_history.jsonl at runtime
+└── proposals/, reports/        # Empty placeholders — actual writes default to docs/skill-evolution/
 ```
 
 ## How It Works
@@ -92,15 +92,29 @@ flowchart LR
     C[skill_index.py] -->|skill index| B
     B -->|analysis| D[Proposal .md files]
     D -->|review| E{Human approves?}
-    E -->|Yes| F[skill_manage applies]
-    E -->|No| G[Archive]
+    E -->|Yes| F[evaluate.py gate]
+    F -->|passed| G[skill_manage applies]
+    F -->|failed| H[stays proposed]
+    E -->|No| I[Archive]
 ```
+
+Proposals with confidence above threshold still have to pass the evaluation gate — a deterministic size/growth/YAML check, an LLM-judge rubric score, and a regression check against that target's own history — before `skill_manage` is ever called. See `SKILL.md` for the details and `SKILL_EVOLUTION_*` environment variables.
+
+## Optional: GEPA-lite Optimizer
+
+```bash
+pip install -e ".[optimizer]"
+export SKILL_EVOLUTION_OPTIMIZER_ENABLED=true
+python3 scripts/optimize_skill.py
+```
+
+Scans the evaluation history for low-scoring targets and drafts `improve_existing` proposals for them — through the same review/evaluation gate as any other proposal, never auto-applied directly.
 
 ## Dependencies
 
 - Python 3.10+
 - Hermes Agent (any version)
-- No pip packages required
+- No pip packages required for the core pipeline; `dspy` is an optional extra for `optimize_skill.py` (`pip install -e ".[optimizer]"`)
 
 ## License
 

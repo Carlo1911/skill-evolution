@@ -10,6 +10,10 @@ import pytest
 import evaluate
 from evaluate import EvalResult, evaluate_skill_text, target_key_for_proposal
 
+# Captured before the autouse stub below replaces it, so the integration test at the
+# bottom of this file can run the real evaluator chain.
+_REAL_RUN_EVALUATORS = evaluate.run_evaluators
+
 
 class _FakeChange:
     def __init__(self, field, new_value=None, old_value=None):
@@ -34,6 +38,7 @@ def stub_run_evaluators(monkeypatch):
     def fake_run_evaluators(content, target, context=None):
         captured["content"] = content
         captured["target"] = target
+        captured["context"] = context or {}
         return [EvalResult(score=1.0, passed=True, feedback="ok", evaluator_name="stub")]
 
     monkeypatch.setattr(evaluate, "run_evaluators", fake_run_evaluators)
@@ -80,6 +85,57 @@ def test_proposal_with_no_body_or_description_falls_back_to_summary_and_rational
     assert "Merge skill-a and skill-b" in stub_run_evaluators["content"]
     assert "They overlap significantly." in stub_run_evaluators["content"]
     assert len(results) == 1
+
+
+def test_baseline_size_is_wired_from_the_change_old_value(stub_run_evaluators):
+    """DeterministicEvaluator's growth guard reads context["baseline_size"].
+
+    Without it the growth-vs-baseline check silently no-ops, so a proposal may balloon a
+    skill far past SKILL_EVOLUTION_MAX_GROWTH_PCT and still report
+    "all deterministic checks passed".
+    """
+    baseline = "# My Skill\n\nShort body.\n"
+    proposal = _FakeProposal(
+        target_skill="my-skill",
+        proposed_changes=[_FakeChange(field="body", new_value=baseline + "more\n", old_value=baseline)],
+    )
+    evaluate_skill_text(proposal)
+
+    assert stub_run_evaluators["context"].get("baseline_size") == len(baseline.encode("utf-8"))
+
+
+def test_baseline_size_absent_when_change_has_no_old_value(stub_run_evaluators):
+    """create_new has nothing to grow from -- the growth check must stay inert, not fire on 0."""
+    proposal = _FakeProposal(
+        target_skill="brand-new-skill",
+        proposed_changes=[_FakeChange(field="description", new_value="A brand new skill.")],
+    )
+    evaluate_skill_text(proposal)
+
+    assert not stub_run_evaluators["context"].get("baseline_size")
+
+
+def test_excessive_growth_is_rejected_through_evaluate_skill_text(monkeypatch):
+    """End-to-end guard: the real deterministic evaluator must reject runaway growth.
+
+    Covers the seam the isolated DeterministicEvaluator tests miss -- those pass
+    baseline_size in by hand, so they cannot catch evaluate_skill_text() failing to
+    supply it.
+    """
+    monkeypatch.setattr(evaluate, "run_evaluators", _REAL_RUN_EVALUATORS)
+    monkeypatch.setenv("SKILL_EVOLUTION_EVALUATORS", "deterministic")
+
+    baseline = "---\nname: my-skill\ndescription: does a thing\n---\n\n# My Skill\n\nShort body.\n"
+    bloated = baseline + ("\nverbose padding line.\n" * 60)  # far beyond the 20% default
+
+    proposal = _FakeProposal(
+        target_skill="my-skill",
+        proposed_changes=[_FakeChange(field="body", new_value=bloated, old_value=baseline)],
+    )
+    results = evaluate_skill_text(proposal)
+
+    assert results[0].passed is False, "runaway growth must not pass the deterministic gate"
+    assert "growth" in results[0].feedback.lower()
 
 
 def test_target_key_uses_skill_prefix_when_target_skill_present():
