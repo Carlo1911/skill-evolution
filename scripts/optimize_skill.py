@@ -480,7 +480,7 @@ def main():
     if args.skill:
         try:
             _run_skill(args.skill, args.iterations)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
         return

@@ -847,6 +847,25 @@ def test_skill_flag_runtime_error_prints_message_and_exits_nonzero(monkeypatch, 
     assert "not installed" in captured.err
 
 
+def test_skill_flag_value_error_prints_message_and_exits_nonzero(monkeypatch, capsys):
+    """main()'s --skill path also catches ValueError (e.g. draft_proposal_from_gepa_result()'s
+    structural-validation failure, or run_gepa_optimization()'s ambiguous/unknown-skill errors)
+    and exits 1 with the message on stderr, instead of an uncaught traceback."""
+    monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
+    monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--skill", "some-skill"])
+
+    def fake_run_skill(skill_name, iterations):
+        raise ValueError("GEPA winning candidate for skill 'some-skill' failed structural validation: bad")
+    monkeypatch.setattr(optimize_skill, "_run_skill", fake_run_skill)
+
+    with pytest.raises(SystemExit) as exc_info:
+        optimize_skill.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "failed structural validation" in captured.err
+
+
 def test_skill_flag_not_enough_history_prints_message_and_no_proposal(monkeypatch, capsys, isolated_dirs):
     monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
     monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--skill", "new-skill"])
