@@ -201,6 +201,18 @@ def _reflection_lm_adapter(prompt):
         return ""
 
 
+def _find_skill_matches(skill_name: str) -> List[Dict[str, Any]]:
+    """Return every installed skill whose name matches `skill_name`.
+
+    Shared by run_gepa_optimization() and _resolve_baseline_size_bytes() so a future
+    change to matching semantics (e.g. case-insensitivity) only needs to land once;
+    each caller applies its own handling for the zero/one/many-match cases.
+    """
+    import skill_index
+
+    return [s for s in skill_index.scan_skills() if s["name"] == skill_name]
+
+
 def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     """Run one GEPA optimization pass over an installed skill's body against its own
     recorded session history.
@@ -225,9 +237,8 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     session evidence).
     """
     import fetch_sessions
-    import skill_index
 
-    matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
+    matches = _find_skill_matches(skill_name)
     if not matches:
         raise ValueError(f"No installed skill found matching name '{skill_name}'")
     if len(matches) > 1:
@@ -294,7 +305,7 @@ def _seed_score(result) -> float:
 def _resolve_baseline_size_bytes(skill_name: str) -> Optional[int]:
     """Best-effort UTF-8 byte length of `skill_name`'s currently installed SKILL.md.
 
-    Re-runs the same skill_index.scan_skills() lookup run_gepa_optimization() already
+    Re-runs the same _find_skill_matches() lookup run_gepa_optimization() already
     performs, then reads the resolved file's content directly to compute a byte length
     matching DeterministicEvaluator's own `len(content.encode("utf-8"))` -- deliberately
     NOT scan_skills()'s `size` field, which is a Python string length (character count),
@@ -306,9 +317,7 @@ def _resolve_baseline_size_bytes(skill_name: str) -> Optional[int]:
     skipped gracefully instead of blocking the structural gate on an unrelated lookup
     failure.
     """
-    import skill_index
-
-    matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
+    matches = _find_skill_matches(skill_name)
     if len(matches) != 1:
         return None
     try:
@@ -332,14 +341,16 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
 
     Before building the proposal, runs the winning candidate through
     evaluate.DeterministicEvaluator's structural checks (size, growth-vs-baseline, valid
-    YAML frontmatter) -- the same checks apply_proposal() already runs on approval,
-    applied here too so a structurally broken candidate is rejected before it ever
-    becomes a proposal a human has to catch on review (R4). Raises ValueError, carrying
-    the evaluator's feedback text, when the candidate fails; no SkillEvolutionProposal is
-    constructed in that case. The growth-vs-baseline comparison re-resolves the skill's
-    currently installed SKILL.md size via _resolve_baseline_size_bytes(); when that skill
-    can't be resolved, the growth check is skipped gracefully and only the size +
-    frontmatter checks still run.
+    YAML frontmatter) so a structurally broken candidate is rejected before it ever
+    becomes a proposal a human has to catch on review (R4). Size and frontmatter mirror
+    what apply_proposal() already checks on approval; growth-vs-baseline does not -- that
+    branch is gated on a `baseline_size` context key apply_proposal()'s own gate
+    (evaluate_skill_text()) never populates, so this is the only place growth is actually
+    enforced today. Raises ValueError, carrying the evaluator's feedback text, when the
+    candidate fails; no SkillEvolutionProposal is constructed in that case. The
+    growth-vs-baseline comparison re-resolves the skill's currently installed SKILL.md
+    size via _resolve_baseline_size_bytes(); when that skill can't be resolved, the
+    growth check is skipped gracefully and only the size + frontmatter checks still run.
 
     The proposal's `body` change is the winning candidate text verbatim (result.best_candidate),
     not a placeholder. The rationale reports how many candidates GEPA explored, the
