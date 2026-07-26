@@ -1,5 +1,16 @@
 # Pending Work
 
+> **The actionable backlog now lives in [`pending-work-2026-07-26.md`](pending-work-2026-07-26.md)**,
+> which consolidates every deferred item across all repo documents, re-verified against
+> the code, and prioritizes them. It also records three findings this file predates: that
+> production runs an older copy of the pipeline from `ai-memory-stack` (so today's fixes
+> are not live), that the plan's PII risk never got its stated sign-off, and that
+> malformed numeric env vars crash the gate.
+>
+> This file remains the **evidence record** — the Fase 0 validation narrative, the measured
+> numbers, the retracted conclusion, and the bug post-mortems. The backlog references it
+> rather than restating it, so the two do not drift.
+
 Status snapshot as of 2026-07-26, after the real GEPA optimizer (see
 `docs/plans/2026-07-24-001-feat-real-gepa-optimizer-plan.md`), the
 follow-up hardening pass (see
