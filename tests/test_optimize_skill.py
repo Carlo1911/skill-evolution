@@ -371,7 +371,7 @@ def test_run_gepa_optimization_missing_optional_dependency_gives_clear_actionabl
 # scripts/optimize_skill.py.
 
 
-def _make_gepa_result(best_candidate="optimized skill body text",
+def _make_gepa_result(best_candidate="---\nname: my-skill\ndescription: a test skill\n---\n\noptimized skill body text",
                        val_aggregate_scores=(0.5, 0.8, 0.65),
                        best_idx=1,
                        total_metric_calls=15):
@@ -384,7 +384,8 @@ def _make_gepa_result(best_candidate="optimized skill body text",
 
 
 def test_draft_proposal_from_gepa_result_uses_optimized_candidate_not_placeholder():
-    result = _make_gepa_result(best_candidate="This is the real optimized candidate body.")
+    candidate = "---\nname: my-skill\ndescription: a test skill\n---\n\nThis is the real optimized candidate body."
+    result = _make_gepa_result(best_candidate=candidate)
 
     drafted = optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
 
@@ -392,7 +393,7 @@ def test_draft_proposal_from_gepa_result_uses_optimized_candidate_not_placeholde
     assert drafted.type == proposal_module.ProposalType.IMPROVE_EXISTING
     assert len(drafted.proposed_changes) == 1
     assert drafted.proposed_changes[0].field == "body"
-    assert drafted.proposed_changes[0].new_value == "This is the real optimized candidate body."
+    assert drafted.proposed_changes[0].new_value == candidate
     # Must not be the old placeholder shape.
     assert "Address this feedback and revise" not in drafted.proposed_changes[0].new_value
 
@@ -444,7 +445,10 @@ def test_draft_proposal_from_gepa_result_single_candidate_has_no_runner_up():
 def test_draft_proposal_from_gepa_result_goes_through_same_gate_no_bypass(isolated_dirs, monkeypatch):
     """Regression, covers AE3: a GEPA-drafted proposal is gated identically to any other --
     no special-cased auto-apply path just because it came from the optimizer."""
-    result = _make_gepa_result(best_candidate="candidate body", val_aggregate_scores=[0.4, 0.9], best_idx=1)
+    result = _make_gepa_result(
+        best_candidate="---\nname: weak-skill\ndescription: a test skill\n---\n\ncandidate body",
+        val_aggregate_scores=[0.4, 0.9], best_idx=1,
+    )
     drafted = optimize_skill.draft_proposal_from_gepa_result("weak-skill", result)
     path = proposal_module.save_proposal(drafted, directory=isolated_dirs["proposals_dir"])
     saved = proposal_module.load_proposal(path)
@@ -464,7 +468,10 @@ def test_draft_proposal_from_gepa_result_goes_through_same_gate_no_bypass(isolat
 
 def test_draft_proposal_from_gepa_result_can_apply_when_gate_passes(isolated_dirs, monkeypatch):
     """Flip side: no bypass in either direction -- passes for the same reason any proposal would."""
-    result = _make_gepa_result(best_candidate="candidate body", val_aggregate_scores=[0.4, 0.9], best_idx=1)
+    result = _make_gepa_result(
+        best_candidate="---\nname: weak-skill\ndescription: a test skill\n---\n\ncandidate body",
+        val_aggregate_scores=[0.4, 0.9], best_idx=1,
+    )
     drafted = optimize_skill.draft_proposal_from_gepa_result("weak-skill", result)
     path = proposal_module.save_proposal(drafted, directory=isolated_dirs["proposals_dir"])
     saved = proposal_module.load_proposal(path)
@@ -482,6 +489,91 @@ def test_draft_proposal_from_gepa_result_can_apply_when_gate_passes(isolated_dir
     assert saved.status == proposal_module.ProposalStatus.APPLIED
 
 
+# ── U3 (this unit): pre-draft structural validation gate ────────────────
+#
+# Covers R4/AE2: before a winning GEPA candidate is drafted into a proposal,
+# it must pass DeterministicEvaluator's structural checks (frontmatter, size,
+# growth-vs-baseline). A structurally broken candidate raises ValueError with
+# the evaluator's feedback instead of silently drafting a broken proposal.
+
+
+def test_draft_proposal_from_gepa_result_raises_on_missing_frontmatter(monkeypatch):
+    """Covers AE2: no YAML frontmatter at all -- fails with a clear structural error."""
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
+    result = _make_gepa_result(best_candidate="This is plain prose with no frontmatter at all.")
+
+    with pytest.raises(ValueError, match="frontmatter"):
+        optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+
+def test_draft_proposal_from_gepa_result_raises_on_missing_required_field(monkeypatch):
+    """Frontmatter delimiters present, but the required 'name' field is missing."""
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
+    result = _make_gepa_result(
+        best_candidate="---\ndescription: a test skill\n---\n\nSome body text."
+    )
+
+    with pytest.raises(ValueError, match="name"):
+        optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+
+def test_draft_proposal_from_gepa_result_raises_on_size_limit(monkeypatch):
+    """A structurally valid candidate that exceeds the configured size limit fails closed."""
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
+    monkeypatch.setenv("SKILL_EVOLUTION_MAX_SKILL_SIZE_KB", "0.05")  # 51.2 bytes
+    candidate = "---\nname: my-skill\ndescription: a test skill\n---\n\n" + ("x" * 500)
+    result = _make_gepa_result(best_candidate=candidate)
+
+    with pytest.raises(ValueError, match="size"):
+        optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+
+def test_draft_proposal_from_gepa_result_raises_on_growth_limit(tmp_path, monkeypatch):
+    """A candidate that grows too much over the resolved installed baseline fails closed."""
+    skill_md_path = tmp_path / "SKILL.md"
+    skill_md_path.write_text("---\nname: my-skill\ndescription: a test skill\n---\n\ntiny\n")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "my-skill", "category": "cat", "description": "test", "path": str(skill_md_path), "size": 10},
+    ])
+    # Comfortably under the default 15KB size cap, but far more than 20% growth
+    # over the tiny installed baseline above.
+    candidate = "---\nname: my-skill\ndescription: a test skill\n---\n\n" + ("y" * 2000)
+    result = _make_gepa_result(best_candidate=candidate)
+
+    with pytest.raises(ValueError, match="growth"):
+        optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+
+def test_draft_proposal_from_gepa_result_skips_growth_check_when_skill_unresolvable(monkeypatch):
+    """No installed skill matches (e.g. renamed/removed) -- growth check is skipped
+    gracefully, and a structurally valid, non-oversized candidate still succeeds."""
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
+    result = _make_gepa_result(
+        best_candidate="---\nname: renamed-skill\ndescription: a test skill\n---\n\nSome valid body."
+    )
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result("renamed-skill", result)
+
+    assert drafted.target_skill == "renamed-skill"
+    assert drafted.proposed_changes[0].new_value == result.best_candidate
+
+
+def test_draft_proposal_from_gepa_result_does_not_construct_proposal_on_failure(monkeypatch):
+    """A structural failure must not leave a half-built proposal object behind --
+    draft_proposal_from_gepa_result() raises before SkillEvolutionProposal is built."""
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
+    monkeypatch.setattr(
+        proposal_module, "SkillEvolutionProposal",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("SkillEvolutionProposal must not be constructed on a failed structural check")
+        ),
+    )
+    result = _make_gepa_result(best_candidate="no frontmatter here")
+
+    with pytest.raises(ValueError):
+        optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+
 def test_gepa_flow_produces_saved_proposal_for_target_skill(tmp_path, isolated_dirs, monkeypatch):
     """Exercises the full pipeline end to end -- run_gepa_optimization() (stubbed `gepa`
     module, fixture session history) feeding draft_proposal_from_gepa_result() feeding
@@ -493,7 +585,13 @@ def test_gepa_flow_produces_saved_proposal_for_target_skill(tmp_path, isolated_d
         {"name": "weak-skill", "category": "cat", "description": "test", "path": skill_md_path, "size": 10},
     ])
     monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(5))
-    fake_gepa = _make_fake_gepa()
+    fake_result = types.SimpleNamespace(
+        best_candidate="---\nname: weak-skill\ndescription: a test skill\n---\n\noptimized body",
+        val_aggregate_scores=[0.5, 0.8],
+        total_metric_calls=12,
+        best_idx=1,
+    )
+    fake_gepa = _make_fake_gepa(result=fake_result)
     monkeypatch.setattr(optimize_skill, "_require_gepa", lambda: fake_gepa)
 
     result = optimize_skill.run_gepa_optimization("weak-skill")
@@ -560,7 +658,7 @@ def test_skill_flag_runs_full_flow_and_prints_saved_path(monkeypatch, capsys, is
         captured_args["skill_name"] = skill_name
         captured_args["iterations"] = iterations
         return types.SimpleNamespace(
-            best_candidate="improved body",
+            best_candidate="---\nname: my-skill\ndescription: a test skill\n---\n\nimproved body",
             val_aggregate_scores=[0.5, 0.9],
             best_idx=1,
             total_metric_calls=12,
@@ -594,7 +692,7 @@ def test_skill_flag_without_iterations_defaults_to_none(monkeypatch, capsys, iso
         captured_args["skill_name"] = skill_name
         captured_args["iterations"] = iterations
         return types.SimpleNamespace(
-            best_candidate="improved body",
+            best_candidate="---\nname: my-skill\ndescription: a test skill\n---\n\nimproved body",
             val_aggregate_scores=[0.9],
             best_idx=0,
             total_metric_calls=3,

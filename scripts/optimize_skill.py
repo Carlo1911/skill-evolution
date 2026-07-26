@@ -272,6 +272,33 @@ def _seed_score(result) -> float:
     return result.val_aggregate_scores[0]
 
 
+def _resolve_baseline_size_bytes(skill_name: str) -> Optional[int]:
+    """Best-effort UTF-8 byte length of `skill_name`'s currently installed SKILL.md.
+
+    Re-runs the same skill_index.scan_skills() lookup run_gepa_optimization() already
+    performs, then reads the resolved file's content directly to compute a byte length
+    matching DeterministicEvaluator's own `len(content.encode("utf-8"))` -- deliberately
+    NOT scan_skills()'s `size` field, which is a Python string length (character count),
+    not a byte count, and would silently skew the growth-percentage comparison for any
+    skill with non-ASCII content.
+
+    Returns None (rather than raising) when the skill can't be resolved -- no match, an
+    ambiguous match across categories, or a file read failure -- so the growth check is
+    skipped gracefully instead of blocking the structural gate on an unrelated lookup
+    failure.
+    """
+    import skill_index
+
+    matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
+    if len(matches) != 1:
+        return None
+    try:
+        with open(matches[0]["path"], encoding="utf-8") as f:
+            return len(f.read().encode("utf-8"))
+    except OSError:
+        return None
+
+
 def draft_proposal_from_gepa_result(skill_name: str, result):
     """Construct an improve_existing SkillEvolutionProposal from a completed GEPA run.
 
@@ -284,6 +311,17 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     this function -- it does not handle that case and assumes `result` carries a real
     candidate frontier.
 
+    Before building the proposal, runs the winning candidate through
+    evaluate.DeterministicEvaluator's structural checks (size, growth-vs-baseline, valid
+    YAML frontmatter) -- the same checks apply_proposal() already runs on approval,
+    applied here too so a structurally broken candidate is rejected before it ever
+    becomes a proposal a human has to catch on review (R4). Raises ValueError, carrying
+    the evaluator's feedback text, when the candidate fails; no SkillEvolutionProposal is
+    constructed in that case. The growth-vs-baseline comparison re-resolves the skill's
+    currently installed SKILL.md size via _resolve_baseline_size_bytes(); when that skill
+    can't be resolved, the growth check is skipped gracefully and only the size +
+    frontmatter checks still run.
+
     The proposal's `body` change is the winning candidate text verbatim (result.best_candidate),
     not a placeholder. The rationale reports how many candidates GEPA explored, the
     seed-to-winner score delta (R6: "score improved from 0.72 to 0.81"), and the
@@ -291,7 +329,20 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     winner's own index) as a trade-off note (R9) -- unless only one candidate was
     explored, in which case it says so instead of erroring.
     """
+    import evaluate
     import proposal as proposal_module
+
+    structural_context: Dict[str, Any] = {"content_kind": "body"}
+    baseline_size = _resolve_baseline_size_bytes(skill_name)
+    if baseline_size is not None:
+        structural_context["baseline_size"] = baseline_size
+
+    check = evaluate.DeterministicEvaluator().evaluate(result.best_candidate, context=structural_context)
+    if not check.passed:
+        raise ValueError(
+            f"GEPA winning candidate for skill '{skill_name}' failed structural validation: "
+            f"{check.feedback}"
+        )
 
     scores = list(result.val_aggregate_scores)
     num_candidates = len(scores)
