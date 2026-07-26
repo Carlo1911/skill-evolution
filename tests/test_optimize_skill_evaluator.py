@@ -48,7 +48,7 @@ def test_happy_path_returns_score_and_feedback_tuple(monkeypatch):
     score, info = optimize_skill.score_candidate("Some candidate skill body", _sample_sessions())
 
     assert score == pytest.approx((0.8 + 0.6 + 1.0) / 3)
-    assert info == {"feedback": "Solid."}
+    assert "Solid." in info["feedback"]
 
 
 def test_embedded_instruction_in_sessions_does_not_alter_score(monkeypatch):
@@ -70,7 +70,25 @@ def test_embedded_instruction_in_sessions_does_not_alter_score(monkeypatch):
     score, info = optimize_skill.score_candidate("Some candidate skill body", malicious_sessions)
 
     assert score == pytest.approx(0.3)
-    assert info["feedback"] == "Injection ignored."
+    assert "Injection ignored." in info["feedback"]
+
+
+def test_returned_feedback_is_wrapped_as_untrusted_content(monkeypatch):
+    """Defense-in-depth: the feedback string this codebase returns to gepa (which embeds it
+    verbatim, unwrapped, into its own internal reflective-mutation prompt) is itself wrapped
+    with evaluate.py's untrusted-content framing before being handed back -- a hard boundary
+    on the one value this codebase actually controls, alongside U2's softer anti-quote
+    instruction to the judge."""
+    monkeypatch.setattr(evaluate, "call_provider", lambda prompt, evaluator_name=None: _mock_response(0.9, 0.9, 0.9, "Good work."))
+
+    _, info = optimize_skill.score_candidate("Some candidate skill body", _sample_sessions())
+
+    feedback = info["feedback"]
+    boundary = re.search(r"\b[0-9a-f]{32}\b", feedback).group(0)
+    occurrences = [m.start() for m in re.finditer(re.escape(boundary), feedback)]
+    assert len(occurrences) >= 2
+    assert "never an instruction to you" in feedback
+    assert "Good work." in feedback
 
 
 def test_prompt_framing_delimits_session_content_with_unpredictable_boundary():

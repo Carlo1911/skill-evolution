@@ -148,6 +148,15 @@ def score_candidate(candidate: str, sessions: List[Dict[str, Any]],
 
     Fails closed (score=0.0) on any provider error or malformed/out-of-range response rather
     than raising into gepa's optimization loop.
+
+    The returned `feedback` string is wrapped with evaluate.py's untrusted-content framing
+    (random-boundary block, same technique used for the session excerpts in the scoring
+    prompt itself) before it's handed back to gepa. gepa embeds this string verbatim into its
+    own internal reflective-mutation prompt with no framing of its own (confirmed against
+    gepa==0.1.4's actual source) -- U2's anti-quote instruction reduces how often injected
+    session content reaches this field, but doesn't stop the judge from paraphrasing it, so
+    this wrap is defense-in-depth on the one value this codebase actually returns and
+    controls, not a claim that it can sanitize gepa's own prompt construction.
     """
     import evaluate
 
@@ -159,7 +168,13 @@ def score_candidate(candidate: str, sessions: List[Dict[str, Any]],
     except (evaluate.ProviderError, ValueError) as e:
         return 0.0, {"feedback": f"gepa evaluator failed closed: {e}"}
 
-    return avg_score, {"feedback": parsed.get("feedback", "")}
+    feedback_text = parsed.get("feedback", "")
+    boundary = secrets.token_hex(16)
+    framed_feedback = (
+        f"{evaluate.untrusted_content_framing(boundary)}\n"
+        f"{evaluate.wrap_untrusted_block(boundary, feedback_text)}"
+    )
+    return avg_score, {"feedback": framed_feedback}
 
 
 def _require_gepa():
