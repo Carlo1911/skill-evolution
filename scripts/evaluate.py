@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-from fetch_sessions import SECRET_PATTERNS, contains_secret
+from fetch_sessions import contains_secret, env_float, env_int
 from skill_index import parse_name_description_frontmatter
 
 # When run directly (python3 scripts/evaluate.py), this module loads as
@@ -466,7 +466,7 @@ class DeterministicEvaluator(Evaluator):
     def evaluate(self, content: str, context: Optional[Dict[str, Any]] = None) -> EvalResult:
         context = context or {}
         size_bytes = len(content.encode("utf-8"))
-        max_kb = float(os.environ.get(MAX_SKILL_SIZE_KB_ENV_VAR, DEFAULT_MAX_SKILL_SIZE_KB))
+        max_kb = env_float(MAX_SKILL_SIZE_KB_ENV_VAR, DEFAULT_MAX_SKILL_SIZE_KB)
         max_bytes = max_kb * 1024
         if size_bytes > max_bytes:
             return self._fail(f"size {size_bytes}B exceeds {int(max_bytes)}B limit ({max_kb:g}KB)")
@@ -474,10 +474,10 @@ class DeterministicEvaluator(Evaluator):
         baseline_size = context.get("baseline_size")
         if baseline_size:
             delta_pct = ((size_bytes - baseline_size) / baseline_size) * 100
-            max_growth = float(os.environ.get(MAX_GROWTH_PCT_ENV_VAR, DEFAULT_MAX_GROWTH_PCT))
+            max_growth = env_float(MAX_GROWTH_PCT_ENV_VAR, DEFAULT_MAX_GROWTH_PCT)
             if delta_pct > max_growth:
                 return self._fail(f"growth {delta_pct:.1f}% exceeds {max_growth:g}% limit over baseline")
-            max_shrink = float(os.environ.get(MAX_SHRINK_PCT_ENV_VAR, DEFAULT_MAX_SHRINK_PCT))
+            max_shrink = env_float(MAX_SHRINK_PCT_ENV_VAR, DEFAULT_MAX_SHRINK_PCT)
             if -delta_pct > max_shrink:
                 return self._fail(
                     f"shrink {-delta_pct:.1f}% exceeds {max_shrink:g}% limit below baseline "
@@ -487,10 +487,8 @@ class DeterministicEvaluator(Evaluator):
         original_size = context.get("original_size")
         if original_size:
             drift_pct = ((size_bytes - original_size) / original_size) * 100
-            max_cum_growth = float(os.environ.get(MAX_CUMULATIVE_GROWTH_PCT_ENV_VAR,
-                                                  DEFAULT_MAX_CUMULATIVE_GROWTH_PCT))
-            max_cum_shrink = float(os.environ.get(MAX_CUMULATIVE_SHRINK_PCT_ENV_VAR,
-                                                  DEFAULT_MAX_CUMULATIVE_SHRINK_PCT))
+            max_cum_growth = env_float(MAX_CUMULATIVE_GROWTH_PCT_ENV_VAR, DEFAULT_MAX_CUMULATIVE_GROWTH_PCT)
+            max_cum_shrink = env_float(MAX_CUMULATIVE_SHRINK_PCT_ENV_VAR, DEFAULT_MAX_CUMULATIVE_SHRINK_PCT)
             if drift_pct > max_cum_growth:
                 return self._fail(
                     f"cumulative growth {drift_pct:.1f}% exceeds {max_cum_growth:g}% limit "
@@ -571,7 +569,7 @@ class LLMJudgeEvaluator(Evaluator):
         except (ProviderError, ValueError) as e:
             return self._fail(f"llm_judge failed closed: {e}")
 
-        threshold = float(os.environ.get(LLM_JUDGE_THRESHOLD_ENV_VAR, DEFAULT_LLM_JUDGE_THRESHOLD))
+        threshold = env_float(LLM_JUDGE_THRESHOLD_ENV_VAR, DEFAULT_LLM_JUDGE_THRESHOLD)
         return EvalResult(
             score=avg_score, passed=avg_score >= threshold, evaluator_name=self.name,
             feedback=parsed.get("feedback", ""),

@@ -79,6 +79,52 @@ DEFAULT_LOOKBACK_HOURS = 48
 DEFAULT_MAX_SESSIONS = 20
 
 
+# ── Numeric env-var reading, shared by every tunable ────────────────────
+# Lives here, the lowest-level module, so evaluate.py (which already imports from this
+# file) and optimize_skill.py can share one implementation instead of three copies.
+
+def _env_number(name: str, default, cast):
+    """Read a numeric env var, falling back to `default` when absent or malformed.
+
+    Every tunable used to be read with a bare int()/float() over os.environ.get, across 11
+    call sites, so a typo raised ValueError out of whichever component read it first:
+    `SKILL_EVOLUTION_MAX_GROWTH_PCT=abc` took down the deterministic evaluator with a stack
+    trace instead of producing a gate decision. That was survivable while this code was not
+    the live pipeline; it now runs unattended nightly, where one typo'd variable costs the
+    whole run.
+
+    The fallback is announced on stderr rather than applied silently -- a misconfiguration
+    that degrades quietly persists until somebody happens to notice. stderr specifically,
+    because stdout is the NDJSON channel.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return cast(raw.strip())
+    except (ValueError, AttributeError):
+        print(
+            f"warning: {name}={raw!r} is not a valid {cast.__name__}; "
+            f"falling back to default {default}",
+            file=sys.stderr,
+        )
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    """Float-valued env var with a reported fallback. See _env_number."""
+    return _env_number(name, default, float)
+
+
+def env_int(name: str, default: int) -> int:
+    """Int-valued env var with a reported fallback. See _env_number.
+
+    A float-looking value like "1.5" is malformed for an int setting and falls back rather
+    than truncating -- silently turning 1.5 into 1 is the worse surprise.
+    """
+    return _env_number(name, default, int)
+
+
 def _read_state() -> Optional[Dict[str, Any]]:
     """Return the raw state dict, or None when absent/unreadable."""
     if not os.path.exists(STATE_FILE):
@@ -305,7 +351,7 @@ def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH,
     -- which would only be read once, at import time.
     """
     if max_sessions is None:
-        max_sessions = int(os.environ.get(MAX_SESSIONS_FOR_SKILL_ENV_VAR, DEFAULT_MAX_SESSIONS_FOR_SKILL))
+        max_sessions = env_int(MAX_SESSIONS_FOR_SKILL_ENV_VAR, DEFAULT_MAX_SESSIONS_FOR_SKILL)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

@@ -12,8 +12,8 @@ than restating it, so the two do not drift. (Three divergent copies of
 `fetch_sessions.py` are what caused P0-1 below; duplicating prose is the same failure mode
 in a cheaper form.)
 
-Test baseline at time of writing: **253 passed** with `gepa` installed, **249 passed +
-1 skipped** without.
+Test baseline: **318 passed** with `gepa` installed, **314 passed + 1 skipped** without
+(was 253/249 when this document was first written; P0-1 and P0-3 added the rest).
 
 ---
 
@@ -50,11 +50,31 @@ Verified: the live execution chain contains no `ai-memory-stack` reference in ei
 wrapper or any job field; the wrapper emits clean NDJSON through the symlink from an
 unrelated cwd; schedule, `enabled`, and the daemon's own timestamp fields were preserved.
 
-**Still open from this item:** the stale copies under `~/Projects/ai-memory-stack/`
-(`scripts/skill-evolution/`, `skills/hermes-skill-evolution/scripts/`, and
-`docs/skill-evolution/session-analyzer-prompt.md`) are unused but not removed — that is a
-different project, and deleting or deprecating them is the owner's call. A `DEPRECATED.md`
-pointing here is the suggested minimum so nobody edits them believing they are live.
+**Follow-up done:** `~/Projects/ai-memory-stack/docs/skill-evolution/DEPRECATED.md` now
+records that nothing there executes, which copy was stale in what way, and what still needs
+attention. The stale copies themselves were left in place — a different project, and
+deleting them is the owner's call. The file is uncommitted in that repo (it already had 8
+uncommitted changes; committing on its behalf is not this work's place).
+
+**Three things that surfaced while writing it:**
+
+1. **Five unreviewed proposals were about to be orphaned.** Production had been writing to
+   `ai-memory-stack/docs/skill-evolution/proposals/` and 8 real proposals accumulated there;
+   new ones now go to this repo, so nobody would have looked at the old ones again. Five
+   still carry `status: proposed` and await a decision — `gh-cli-in-subagents` (0.85),
+   `hermes-agent` (0.80), `money-admin-operations` (0.90), `ci-cd-and-automation` (0.75),
+   `local-ai-model-audit` (0.80). Listed in DEPRECATED.md. **Decide whether to migrate them
+   into this repo's proposals directory or close them out.**
+2. **Auto-apply was demonstrably firing.** Two proposals are `status: applied`, the most
+   recent from the night of 2026-07-25 at confidence 0.88. So turning auto-apply off was not
+   a theoretical change — the nightly run had been mutating installed skills without review.
+3. **An invalid status silently disappears from inventory.** One file carries
+   `status: already_covered`, which is not in `ProposalStatus`
+   (`proposed | approved | rejected | applied`). `load_proposal()` raises `ValueError` on it,
+   and `list_proposals()` **swallows that and returns 7 of 8 files with no warning**. A
+   model-authored status value can therefore make a proposal vanish from `--list` and from
+   `--retroactive` without any signal. Worth a fix: either accept unknown statuses as
+   opaque, or surface the skipped file rather than dropping it.
 
 <details>
 <summary>Original finding (kept for context)</summary>
@@ -125,7 +145,31 @@ excerpts in one prompt.
 This needs a decision, not necessarily code: accept the exposure explicitly and record
 it, or add a redaction/opt-in layer. Either way it should stop being invisible.
 
-### P0-3. A malformed numeric env var crashes the gate
+### ~~P0-3. A malformed numeric env var crashes the gate~~ — RESOLVED 2026-07-26
+
+All 11 call sites now go through `fetch_sessions.env_float()` / `env_int()`, which fall
+back to the documented default and **announce the fallback on stderr** rather than applying
+it silently — a misconfiguration that degrades quietly persists until somebody notices, and
+stdout is the NDJSON channel so the warning cannot go there. `"1.5"` for an int setting is
+treated as malformed rather than truncated to `1`.
+
+The helpers live in `fetch_sessions.py`, the lowest-level module, because `evaluate.py`
+already imports from it — one implementation instead of three copies. Verified:
+`SKILL_EVOLUTION_MAX_GROWTH_PCT=abc` now warns and produces a gate decision instead of
+raising `ValueError` out of the evaluator.
+
+Two things found while doing it:
+
+- **`evaluate.py`'s dead `SECRET_PATTERNS` import is gone** (was P2-5), along with the stale
+  docstring describing redaction as substring-only.
+- **`sessions_for_skill()` raises `sqlite3.OperationalError` on a missing DB** rather than
+  degrading — sqlite creates the empty file, then the query finds no tables. Pre-existing,
+  unrelated to env parsing, and left as-is; noted under "Smaller open items".
+
+<details>
+<summary>Original finding (kept for context)</summary>
+
+#### P0-3. A malformed numeric env var crashes the gate
 
 **11 call sites** parse numbers with a bare `int()`/`float()` on `os.environ.get`, with no
 `try/except` (`evaluate.py:469,477,480,490,492,574`;
@@ -138,6 +182,8 @@ The hardening plan accepted this as convention ("no malformed-value guarding bey
 unattended nightly: a typo in one env var takes down the nightly run with a stack trace
 instead of falling back to a documented default. Cheap to fix, and the fail-closed
 posture the evaluation plan's R21 asks for argues for it.
+
+</details>
 
 ---
 
@@ -199,7 +245,7 @@ hardening plan are `[ ]` despite the corresponding code being shipped and tested
 now runs for real (under `gepa`, not the `dspy` the doc assumed). Anyone reading these
 docs concludes far less is built than actually is.
 
-### P2-5. Dead import and a stale docstring
+### ~~P2-5. Dead import and a stale docstring~~ — RESOLVED 2026-07-26 (with P0-3)
 
 `evaluate.py:24` imports `SECRET_PATTERNS` from `fetch_sessions`; it is referenced only
 inside a docstring (`:268`) and nowhere in code (AST-verified). That docstring is also
@@ -251,6 +297,14 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 - **R9's runner-up narrative is score-only.** The plan asks the rationale to report *what
   trade-off* the runner-up made; the code reports its score and margin, not a qualitative
   description.
+- **`sessions_for_skill()` does not degrade on a missing/empty DB** — it raises
+  `sqlite3.OperationalError` because sqlite creates the file and the query then finds no
+  tables. Only reachable via the optimizer path, so low impact, but it is an unhandled
+  crash rather than an empty result.
+- **An invalid proposal status silently drops the file from inventory** —
+  `list_proposals()` swallows `load_proposal()`'s `ValueError`, so a model-authored
+  status like `already_covered` makes a proposal vanish from `--list` and
+  `--retroactive` with no warning. Seen for real in the ai-memory-stack proposals.
 - **The User-Agent fix is unverified against Claude and Ollama.** It changed shared
   `_post_json()` behavior and was only exercised against OpenCode Zen.
 
@@ -272,9 +326,7 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 
 1. ~~**P0-1** — sync production.~~ **Done 2026-07-26.** This repo is the source of truth;
    the nightly job now executes its code, and auto-apply is off by decision.
-2. **P0-3** — guard the env parsing. Small, and it protects the unattended path. Now more
-   valuable than before: production runs this code directly, so a typo'd env var takes
-   down the nightly run rather than a stale copy nobody depends on.
+2. ~~**P0-3** — guard the env parsing.~~ **Done 2026-07-26**, along with P2-5.
 3. **P0-2** — make a decision on PII, even if the decision is "accept and document".
 4. **P1-1, P1-2** — close today's own two gaps while the context is fresh.
 5. **P2-1..P2-5** — documentation, batched. Cheap, and a prerequisite for item 8.

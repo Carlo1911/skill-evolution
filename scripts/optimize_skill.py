@@ -46,7 +46,8 @@ def _resolve_min_sessions() -> int:
     MIN_SESSIONS. Shared by run_gepa_optimization() (the actual gate) and
     _run_skill() (which prints the resolved value, not the unconfigured default)
     so the two never drift apart."""
-    return int(os.environ.get(MIN_SESSIONS_ENV_VAR, MIN_SESSIONS))
+    import evaluate
+    return evaluate.env_int(MIN_SESSIONS_ENV_VAR, MIN_SESSIONS)
 
 
 class NotEnoughHistoryResult(NamedTuple):
@@ -287,11 +288,13 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
             session_count=len(sessions),
         )
 
+    import evaluate  # local, matching this module's lazy-import convention
+
     gepa_api = _require_gepa()
     bound_evaluator = functools.partial(score_candidate, sessions=sessions)
     max_metric_calls = (
         iterations if iterations is not None
-        else int(os.environ.get(MAX_METRIC_CALLS_ENV_VAR, DEFAULT_MAX_METRIC_CALLS))
+        else evaluate.env_int(MAX_METRIC_CALLS_ENV_VAR, DEFAULT_MAX_METRIC_CALLS)
     )
     config = gepa_api.GEPAConfig(
         engine=gepa_api.EngineConfig(max_metric_calls=max_metric_calls),
@@ -324,10 +327,8 @@ def _build_objective(seed_body: str) -> str:
     import evaluate
 
     base = len(seed_body.encode("utf-8"))
-    max_growth = float(os.environ.get(evaluate.MAX_GROWTH_PCT_ENV_VAR,
-                                      evaluate.DEFAULT_MAX_GROWTH_PCT))
-    max_shrink = float(os.environ.get(evaluate.MAX_SHRINK_PCT_ENV_VAR,
-                                      evaluate.DEFAULT_MAX_SHRINK_PCT))
+    max_growth = evaluate.env_float(evaluate.MAX_GROWTH_PCT_ENV_VAR, evaluate.DEFAULT_MAX_GROWTH_PCT)
+    max_shrink = evaluate.env_float(evaluate.MAX_SHRINK_PCT_ENV_VAR, evaluate.DEFAULT_MAX_SHRINK_PCT)
     lower = int(base * (1 - max_shrink / 100))
     upper = int(base * (1 + max_growth / 100))
 
