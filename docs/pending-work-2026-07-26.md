@@ -21,7 +21,45 @@ Test baseline at time of writing: **253 passed** with `gepa` installed, **249 pa
 
 Nothing else in this document is urgent. These three are.
 
-### P0-1. Production runs a different, older copy of the pipeline
+### ~~P0-1. Production runs a different, older copy of the pipeline~~ — RESOLVED 2026-07-26
+
+**Owner's decision: this repo is the source of truth.** Resolved as follows (see
+`CLAUDE.md` → "Production deployment" for the durable description):
+
+- `~/.hermes/scripts/skill-evolution-fetch.sh` is now a **symlink** into this repo instead
+  of a hardcoded 2-line wrapper that `cd`'d to `ai-memory-stack`. A symlink rather than a
+  copy, so a fourth divergent copy cannot accumulate. Old file backed up as
+  `…-fetch.sh.bak-2026-07-26`.
+- The repo's own wrapper had to be fixed first — it had **never worked**: it probed two
+  paths that do not exist here, and it leaked the repo path to stdout via
+  `if git rev-parse --show-toplevel`, which would have corrupted the NDJSON stream. It now
+  resolves `fetch_sessions.py` relative to its own location, following symlinks, and passes
+  arguments through.
+- The job prompt now lives versioned at `docs/cron-job-prompt.md` and was pushed with
+  `hermes cron edit ba29abd33988 --prompt "$(cat …)"` — the CLI, not a hand-edit of
+  `jobs.json`, since the daemon owns fields in that file. Backup of the pre-change
+  `jobs.json` was taken.
+- The analyzer prompt was reconciled. The deployed copy was not merely *behind* the repo's:
+  it contained a `Phase 2: Auto-Apply` section instructing in-session `skill_manage` calls,
+  which the repo's Rule 2 explicitly forbids. Owner chose proposals-only, so **auto-apply
+  is now off** (it was live before, applying anything at `confidence >= 0.85`), and the
+  repo's prompt gained a "Making a proposal reviewable" spec plus a generalized Reporting
+  section carrying the deployed copy's delivery substance without its personal config.
+
+Verified: the live execution chain contains no `ai-memory-stack` reference in either the
+wrapper or any job field; the wrapper emits clean NDJSON through the symlink from an
+unrelated cwd; schedule, `enabled`, and the daemon's own timestamp fields were preserved.
+
+**Still open from this item:** the stale copies under `~/Projects/ai-memory-stack/`
+(`scripts/skill-evolution/`, `skills/hermes-skill-evolution/scripts/`, and
+`docs/skill-evolution/session-analyzer-prompt.md`) are unused but not removed — that is a
+different project, and deleting or deprecating them is the owner's call. A `DEPRECATED.md`
+pointing here is the suggested minimum so nobody edits them believing they are live.
+
+<details>
+<summary>Original finding (kept for context)</summary>
+
+#### P0-1. Production runs a different, older copy of the pipeline
 
 The live cron job `skill-evolution-analysis` (daily 02:00, `enabled: true`,
 `last_status: ok`, last ran 2026-07-26T02:02) already points at *this skill*
@@ -62,6 +100,13 @@ ai-memory-stack").
 Note the state-file transition is safe in this direction: this repo preserves an existing
 flat-dict file's layout and only writes the documented shape to a fresh file. Verify that
 on the first run regardless.
+
+</details>
+
+**Watch on the first live run (2026-07-27 02:00):** this is the first night the nightly job
+executes this repo's code. Worth checking afterwards that the state file kept its flat-dict
+layout, that proposals landed in `docs/skill-evolution/proposals/`, and that the report
+reflects the new proposals-only mode rather than reporting applied changes.
 
 ### P0-2. PII in session excerpts is not redacted at all — and never got its sign-off
 
@@ -225,9 +270,11 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 
 ## Recommended order
 
-1. **P0-1** — decide the source of truth and sync production. Everything else is
-   improvement; this is live exposure plus four fixes that aren't running.
-2. **P0-3** — guard the env parsing. Small, and it protects the unattended path.
+1. ~~**P0-1** — sync production.~~ **Done 2026-07-26.** This repo is the source of truth;
+   the nightly job now executes its code, and auto-apply is off by decision.
+2. **P0-3** — guard the env parsing. Small, and it protects the unattended path. Now more
+   valuable than before: production runs this code directly, so a typo'd env var takes
+   down the nightly run rather than a stale copy nobody depends on.
 3. **P0-2** — make a decision on PII, even if the decision is "accept and document".
 4. **P1-1, P1-2** — close today's own two gaps while the context is fresh.
 5. **P2-1..P2-5** — documentation, batched. Cheap, and a prerequisite for item 8.

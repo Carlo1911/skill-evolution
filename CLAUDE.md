@@ -49,6 +49,47 @@ pytest
 
 No build step and no non-stdlib runtime dependencies for the core pipeline. `gepa` (the standalone PyPI package, not `dspy`) is an optional extra (`pip install -e ".[optimizer]"`) required only by `scripts/optimize_skill.py`; nothing else imports it.
 
+## Production deployment
+
+This repo is the **single source of truth** for the pipeline. It runs live via the Hermes
+cron job `skill-evolution-analysis` (id `ba29abd33988`, daily 02:00, `deliver: telegram`,
+`provider: opencode` / `model: big-pickle`). The chain is:
+
+```
+job.script = skill-evolution-fetch.sh
+  → ~/.hermes/scripts/skill-evolution-fetch.sh   (symlink into this repo)
+  → <repo>/scripts/skill-evolution-fetch.sh      (resolves symlinks, then runs …)
+  → <repo>/scripts/fetch_sessions.py             (NDJSON → injected into the job prompt)
+job.prompt = docs/cron-job-prompt.md             (kept verbatim in this repo)
+  → which points the agent at docs/session-analyzer-prompt.md
+```
+
+Two things make this worth reading before changing anything:
+
+- **The deployed entry point is a symlink, not a copy.** Editing `scripts/` here changes
+  production immediately, with no deploy step. That is deliberate: production previously
+  ran a *different, older* implementation from `ai-memory-stack` (three divergent copies of
+  `fetch_sessions.py` existed), which is why the regex secret redaction, the size guards,
+  and the state-schema fix were all absent from the nightly run despite living here. The
+  old hardcoded wrapper is backed up at
+  `~/.hermes/scripts/skill-evolution-fetch.sh.bak-2026-07-26`.
+- **The job prompt is versioned at `docs/cron-job-prompt.md`.** Change it there and push it
+  with `hermes cron edit ba29abd33988 --prompt "$(cat docs/cron-job-prompt.md)"`. Use the
+  `hermes cron` CLI rather than hand-editing `~/.hermes/cron/jobs.json` — the daemon owns
+  fields in that file (`next_run_at`, `last_run_at`, `fire_claim`).
+
+**The nightly run is proposals-only.** It writes proposals and reports; it never calls
+`skill_manage`. Auto-apply used to be on (the old prompt applied anything with
+`confidence >= 0.85` in-session) and was deliberately turned off: applying is a
+human-gated step, and `docs/session-analyzer-prompt.md`'s "Making a proposal reviewable"
+spec exists so a reviewer can decide without re-reading the sessions. Note that **no
+automated step applies proposals** — there is no second cron job and nothing in `scripts/`
+calls `apply_proposal()` on its own, so proposals wait for a human by design.
+
+The copies still living under `~/Projects/ai-memory-stack/` are now stale and unused by the
+execution path. They have deliberately **not** been deleted (that is a separate project);
+see `docs/pending-work-2026-07-26.md`.
+
 ## Architecture
 
 ```
@@ -79,7 +120,7 @@ optimize_skill.py (optional, SKILL_EVOLUTION_OPTIMIZER_ENABLED=true)
 ```
 
 - **`scripts/fetch_sessions.py`** — reads `~/.hermes/state.db` (SQLite; `sessions`/`messages` tables), filters out already-processed sessions (via `state.py`'s state file) and anything older than `--lookback-hours`, redacts messages via `contains_secret()` — which layers the fixed `SECRET_PATTERNS` substrings (known vendor prefixes, specific env-var names) with shape-based `SECRET_REGEXES`. The regex layer exists because the substring list provably leaked: scanning the real 26,794 message bodies found 27 `password=` assignments, 23 generic `*_TOKEN=`/`*_SECRET=` assignments, 6 generic `sk-` keys, 5 `Authorization: Bearer` headers and a credentialed DB URI that it missed, all of which would have been forwarded to a provider verbatim. Length floors (20+ chars for opaque keys, 8+ for assigned values) keep `MAX_TOKENS=1024` and `DEBUG=true` off the list; measured over-redaction is 0.229% of lines. This predicate is the single chokepoint for **both** redaction points (provider prompts and on-disk proposals), so err toward over-detection — truncates long messages, and emits one JSON object per session to stdout. Marks sessions processed as a side effect unless `--dry-run`. Its queries select `sessions.started_at`/`messages.timestamp` (matching the live schema); the per-session output dict's timestamp key is `started_at` (there is no `created_at` key, and `total_tokens` is not emitted — `analyze.py` defaults it). `sessions_for_skill()` (used by the optimizer) is a separate query on the same DB that filters sessions to those touching a given skill, capped at `max_sessions` most-recent-first.
-- **`scripts/skill-evolution-fetch.sh`** — thin bash wrapper the cron job invokes: it `cd`s to the git repo root (or `$HOME`), locates the deployed `fetch_sessions.py` under `${HERMES_HOME:-~/.hermes}/scripts/skill-evolution` (falling back to `docs/skill-evolution/scripts/` in-repo), and runs it. No logic beyond path resolution — it exists so the cron entry can be a single stable command regardless of where the scripts are installed.
+- **`scripts/skill-evolution-fetch.sh`** — the bash wrapper the cron job invokes, so the cron entry stays one stable command. It resolves `fetch_sessions.py` **relative to its own location, following symlinks**, and passes arguments through. Two earlier strategies were broken and are worth not reinventing: probing `${HERMES_HOME}/scripts/skill-evolution` with a `docs/skill-evolution/scripts/` fallback (neither path exists here, so it always failed), and `if git rev-parse --show-toplevel; then` to find the project root (that command's stdout isn't captured, so the repo path was printed to stdout and prepended a stray non-JSON line to the NDJSON stream `analyze.py` consumes). **Nothing but `fetch_sessions.py` may write to stdout.** Symlink-following matters because the deployed entry point is a symlink — see "Production deployment" below.
 - **`scripts/state.py`** — small JSON-file-backed tracker (`~/.hermes/skill_evolution_state.json`) for which session IDs have already been analyzed. `fetch_sessions.py` duplicates this logic inline rather than importing it — if you change one, check the other (`tests/test_state_schema_compat.py` parametrizes over both modules to catch drift). **Two on-disk shapes exist and both must be read.** This repo and the deployed `SKILL.md` document `{"processed_sessions": [...], "last_analyzed_at": ..., "version": 1}`, but the file actually deployed is a flat `{session_id: iso_timestamp}` map (101 entries). Reading only the documented shape returned `[]` every run, which silently disabled dedup entirely — `--dry-run --lookback-hours 168` reported 20 unprocessed sessions that had all in fact been processed. `mark_processed()` now **preserves whichever layout the file already has** (writing the documented shape only for a fresh file) because rewriting the flat map would destroy timestamps another producer maintains. Don't "normalize" that file without confirming who else writes it. **Testability gap:** `STATE_FILE` is a hardcoded module constant with no env override, so running the pipeline against an isolated state requires monkeypatching `fetch_sessions.STATE_FILE` (what `tests/test_state_schema_compat.py` does) rather than setting a variable — and once dedup works, `fetch_sessions.py --dry-run` legitimately returns **0 sessions** because every real session is already marked processed, which looks like a failure but is correct.
 - **`scripts/skill_index.py`** — scans `~/.hermes/skills/<category>/<skill>/SKILL.md`, hand-parses the YAML frontmatter (no PyYAML dependency — stdlib only) via `parse_name_description_frontmatter()` for `name`/`description`, and emits a JSON index the analyzer prompt uses as "what skills currently exist." `evaluate.py`'s `DeterministicEvaluator` reuses this same parser to validate a proposal's frontmatter. `scan_skills()` **skips dot-prefixed category directories**: the live tree holds `.archive/` (retired skills), `.curator_backups/` (timestamped snapshots) and `.hub/` (lockfiles, audit log, quarantine). Without that filter the index reported retired skills as currently existing, and an archived twin of a live skill (`money-admin-messaging` exists in both `.archive/` and `general-skills/`) made `optimize_skill.py --skill` reject the live skill as an ambiguous duplicate.
 - **`scripts/analyze.py`** — pure formatter: NDJSON sessions on stdin → markdown-ish text on stdout for LLM consumption. No analysis logic lives here; the actual judgment is made by whatever LLM/agent reads this text plus `docs/session-analyzer-prompt.md`. Its only reusable function is `format_session(session) -> str` (one session at a time) — there is no batch formatter, so an in-process caller joins the per-session strings itself; `main()` is the stdin/stdout wrapper. Scale reference from a real run: 8 sessions → ~113KB of formatted text, and with the analyzer instructions plus a 142-skill index the assembled prompt reached ~134KB, which is large enough that provider context limits are a real design constraint on how many sessions one analysis pass can carry.
