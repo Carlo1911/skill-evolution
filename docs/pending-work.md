@@ -1,7 +1,9 @@
 # Pending Work
 
-Status snapshot as of 2026-07-25, after the real GEPA optimizer (see
-`docs/plans/2026-07-24-001-feat-real-gepa-optimizer-plan.md`) shipped to
+Status snapshot as of 2026-07-26, after the real GEPA optimizer (see
+`docs/plans/2026-07-24-001-feat-real-gepa-optimizer-plan.md`) and the
+follow-up hardening pass (see
+`docs/plans/2026-07-25-001-fix-skill-evolution-hardening-plan.md`) shipped to
 `main`. This is a decision inventory, not a committed roadmap — pick an item,
 then run it through `ce-brainstorm`/`ce-plan` when you're ready to scope it.
 
@@ -36,42 +38,43 @@ untouched.
    deliberately deferred in the evaluation plan's Scope Boundaries. Not
    reconsidered since.
 
-## Discovered while building GEPA, not fixed
+## Discovered while building GEPA, fixed in the hardening pass
 
 Found during implementation and code review of the GEPA optimizer; explicitly
-left out of that work's scope rather than silently expanded into.
+left out of that work's scope, then addressed by
+`docs/plans/2026-07-25-001-fix-skill-evolution-hardening-plan.md`.
 
-- **`fetch_sessions()` still queries the wrong columns.** `scripts/fetch_sessions.py`'s
-  `SESSION_QUERY`/`MESSAGE_QUERY` select `created_at`/`total_tokens`, but the
-  live `~/.hermes/state.db` schema has `sessions.started_at` (no
-  `created_at`, no `total_tokens` at all) and `messages.timestamp` (no
-  `created_at`). Verified directly against the real database. This means the
-  base cron pipeline (`fetch_sessions.py` → `analyze.py` → the cron agent)
-  likely cannot run successfully against production data today. GEPA's own
-  session query (`sessions_for_skill()`) was written against the correct
-  live columns from the start and doesn't share this bug — only the
-  original `fetch_sessions()` function does. A related crash
-  (`sqlite3.Row` has no `.get()`) in the same function *was* fixed as a
-  side effect of a code-review-driven refactor; the column-name mismatch
-  is a separate, larger fix and was left alone.
-- **GEPA's reflection-mutation prompt has no injection-defense framing.**
-  `scripts/optimize_skill.py`'s `_reflection_lm_adapter()` forwards whatever
-  prompt the `gepa` package builds internally straight to
-  `evaluate.call_provider()`, with no boundary/untrusted-content wrapping —
-  unlike every other LLM-judge prompt in this codebase. There's no clean
-  point to add that framing without rewriting `gepa`'s own internal prompt
-  construction. Mitigated today by the existing evaluation gate and human
-  review before any proposal is applied; accepted as a residual risk, not
-  fixed at the source.
-- **Optimizer defaults are unvalidated against real usage.** `MIN_SESSIONS`
-  (3), `DEFAULT_MAX_METRIC_CALLS` (20), and `DEFAULT_MAX_SESSIONS_FOR_SKILL`
-  (20) in `scripts/optimize_skill.py`/`scripts/fetch_sessions.py` are
-  judgment calls made during planning, not tuned against an actual run.
+- **`fetch_sessions()` queried the wrong columns.** *(Fixed.)*
+  `scripts/fetch_sessions.py`'s `SESSION_QUERY`/`MESSAGE_QUERY` now select
+  `sessions.started_at`/`messages.timestamp`, matching the live
+  `~/.hermes/state.db` schema and `sessions_for_skill()`'s existing correct
+  queries. The output dict's `created_at` key was renamed to `started_at`
+  and `total_tokens` was dropped (non-breaking — `analyze.py` already
+  defaults it).
+- **GEPA's reflection-mutation prompt had no injection-defense framing.**
+  *(Narrowed, not eliminated — tracked as an accepted residual risk.)* The
+  judge's `feedback` field (embedded verbatim into `gepa`'s own internal
+  reflection prompt) is now (a) produced under an explicit instruction not to
+  quote session content verbatim, and (b) wrapped with the same
+  untrusted-content framing used elsewhere in this codebase before being
+  returned to `gepa`. `gepa`'s own internal prompt construction remains out
+  of reach — wrapping it directly risks breaking `gepa`'s reflective-mutation
+  mechanism (KD2) — so a paraphrased (non-verbatim) injection is still a live
+  residual risk, just a narrower one than before.
+- **Optimizer defaults were unvalidated against real usage.** *(Made
+  configurable, not yet tuned.)* `MIN_SESSIONS`, `DEFAULT_MAX_METRIC_CALLS`,
+  and `DEFAULT_MAX_SESSIONS_FOR_SKILL` are now overridable via
+  `SKILL_EVOLUTION_OPTIMIZER_MIN_SESSIONS`,
+  `SKILL_EVOLUTION_OPTIMIZER_MAX_METRIC_CALLS`, and
+  `SKILL_EVOLUTION_OPTIMIZER_MAX_SESSIONS_FOR_SKILL`, with today's values
+  (3 / 20 / 20) kept as defaults. Actually tuning those numbers against real
+  usage data is still unstarted — see "GEPA optimizer: shipped but not yet
+  run for real" below.
 
 ## GEPA optimizer: shipped but not yet run for real
 
 `scripts/optimize_skill.py --skill <name> [--iterations N]` is implemented
-and covered by 148 passing tests (all against stubbed `gepa`/provider
+and covered by 166 passing tests (all against stubbed `gepa`/provider
 calls) but has never been run against a real installed skill, real session
 history, or the real `gepa` PyPI package. Before trusting its output:
 
