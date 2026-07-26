@@ -692,7 +692,12 @@ def test_gepa_flow_produces_saved_proposal_for_target_skill(tmp_path, isolated_d
     ])
     monkeypatch.setattr(fetch_sessions, "sessions_for_skill", lambda *a, **kw: _make_sessions(5))
     fake_result = types.SimpleNamespace(
-        best_candidate="---\nname: weak-skill\ndescription: a test skill\n---\n\noptimized body",
+        # Keep this roughly the same byte length as _make_fake_skill()'s body: the
+        # structural check enforces both a growth cap and a shrink floor, so a candidate
+        # much shorter than the installed skill is rejected before a proposal is drafted.
+        # This test is about the end-to-end flow, not about size behavior.
+        best_candidate=("---\nname: weak-skill\ndescription: a test skill\n---\n\n"
+                        "optimized body with equivalent guidance."),
         val_aggregate_scores=[0.5, 0.8],
         total_metric_calls=12,
         best_idx=1,

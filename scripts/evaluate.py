@@ -118,8 +118,16 @@ def get_history_path() -> str:
 
 
 def append_history(target: str, result: EvalResult, session_ids: Optional[List[str]] = None,
-                    path: Optional[str] = None) -> None:
-    """Append one JSON line for `target`'s evaluation result to the history file."""
+                    path: Optional[str] = None, content_size: Optional[int] = None,
+                    baseline_size: Optional[int] = None) -> None:
+    """Append one JSON line for `target`'s evaluation result to the history file.
+
+    `content_size`/`baseline_size` (utf-8 bytes) are what make cumulative drift
+    detectable: original_size_for_target() reads the earliest of them back so a candidate
+    can be compared against where the skill *started*, not just against the body it
+    replaces. Both are optional -- entries written before size recording existed simply
+    carry no size and are skipped by that lookup.
+    """
     history_path = path or get_history_path()
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
 
@@ -129,9 +137,31 @@ def append_history(target: str, result: EvalResult, session_ids: Optional[List[s
         "session_ids": session_ids or [],
         **asdict(result),
     }
+    if content_size is not None:
+        entry["content_size"] = content_size
+    if baseline_size is not None:
+        entry["baseline_size"] = baseline_size
 
     with open(history_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def original_size_for_target(target: str, path: Optional[str] = None) -> Optional[int]:
+    """Byte size `target` started at: the earliest size recorded in its history.
+
+    Prefers the earliest entry's `baseline_size` (the body that existed *before* the first
+    recorded change) and falls back to the earliest `content_size`. Returns None when the
+    target has no sized history yet, in which case the cumulative check stays inert and
+    only the per-pass limits apply.
+    """
+    entries = [e for e in _read_all_entries(path or get_history_path())
+               if e.get("target") == target]
+    for key in ("baseline_size", "content_size"):
+        for entry in entries:  # entries are chronological; first wins
+            value = entry.get(key)
+            if value:
+                return value
+    return None
 
 
 def _read_all_entries(path: str) -> List[Dict[str, Any]]:
@@ -382,8 +412,30 @@ def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: O
 
 MAX_SKILL_SIZE_KB_ENV_VAR = "SKILL_EVOLUTION_MAX_SKILL_SIZE_KB"
 MAX_GROWTH_PCT_ENV_VAR = "SKILL_EVOLUTION_MAX_GROWTH_PCT"
+MAX_SHRINK_PCT_ENV_VAR = "SKILL_EVOLUTION_MAX_SHRINK_PCT"
 DEFAULT_MAX_SKILL_SIZE_KB = 15
 DEFAULT_MAX_GROWTH_PCT = 20.0
+# Symmetric with the growth cap, because the judge's `conciseness` criterion actively
+# rewards deletion: a real GEPA run cut a skill body by 70% (losing its "Red Flags",
+# "Common Rationalizations" and "Anti-Patterns" sections) and scored *higher* for it.
+# A cap without a floor only protects against bloat, not against content destruction.
+# Tighter than the growth cap on purpose: an over-long skill is bounded by the absolute
+# 15KB size check and costs context, while deletion silently removes guidance (a real
+# candidate scored *higher* after dropping a skill's "Red Flags" and "Anti-Patterns"
+# sections). 15% also keeps a single pass's bite small -- ~1.4KB of a median 9.7KB skill
+# rather than ~1.9KB. Override with SKILL_EVOLUTION_MAX_SHRINK_PCT.
+DEFAULT_MAX_SHRINK_PCT = 15.0
+# Second reference point, against a target's *original* recorded size rather than the body
+# it immediately replaces. The per-pass limits above reset their reference every pass, so
+# they compound: at 20% per pass, four accepted passes halve a skill while each one looks
+# compliant. RegressionEvaluator can't catch it either -- every deletion raises the judge's
+# `conciseness` score, so each pass outscores the last and the gate keeps passing. These
+# allowances are deliberately wider than the per-pass ones: one pass may move 20%, but
+# total drift across all passes stays bounded instead of running to zero.
+MAX_CUMULATIVE_GROWTH_PCT_ENV_VAR = "SKILL_EVOLUTION_MAX_CUMULATIVE_GROWTH_PCT"
+MAX_CUMULATIVE_SHRINK_PCT_ENV_VAR = "SKILL_EVOLUTION_MAX_CUMULATIVE_SHRINK_PCT"
+DEFAULT_MAX_CUMULATIVE_GROWTH_PCT = 50.0
+DEFAULT_MAX_CUMULATIVE_SHRINK_PCT = 30.0
 
 
 def _extract_frontmatter_fields(content: str) -> Dict[str, str]:
@@ -421,10 +473,36 @@ class DeterministicEvaluator(Evaluator):
 
         baseline_size = context.get("baseline_size")
         if baseline_size:
-            growth_pct = ((size_bytes - baseline_size) / baseline_size) * 100
+            delta_pct = ((size_bytes - baseline_size) / baseline_size) * 100
             max_growth = float(os.environ.get(MAX_GROWTH_PCT_ENV_VAR, DEFAULT_MAX_GROWTH_PCT))
-            if growth_pct > max_growth:
-                return self._fail(f"growth {growth_pct:.1f}% exceeds {max_growth:g}% limit over baseline")
+            if delta_pct > max_growth:
+                return self._fail(f"growth {delta_pct:.1f}% exceeds {max_growth:g}% limit over baseline")
+            max_shrink = float(os.environ.get(MAX_SHRINK_PCT_ENV_VAR, DEFAULT_MAX_SHRINK_PCT))
+            if -delta_pct > max_shrink:
+                return self._fail(
+                    f"shrink {-delta_pct:.1f}% exceeds {max_shrink:g}% limit below baseline "
+                    f"({baseline_size}B -> {size_bytes}B) -- a large deletion needs human review"
+                )
+
+        original_size = context.get("original_size")
+        if original_size:
+            drift_pct = ((size_bytes - original_size) / original_size) * 100
+            max_cum_growth = float(os.environ.get(MAX_CUMULATIVE_GROWTH_PCT_ENV_VAR,
+                                                  DEFAULT_MAX_CUMULATIVE_GROWTH_PCT))
+            max_cum_shrink = float(os.environ.get(MAX_CUMULATIVE_SHRINK_PCT_ENV_VAR,
+                                                  DEFAULT_MAX_CUMULATIVE_SHRINK_PCT))
+            if drift_pct > max_cum_growth:
+                return self._fail(
+                    f"cumulative growth {drift_pct:.1f}% exceeds {max_cum_growth:g}% limit "
+                    f"vs the original {original_size}B (now {size_bytes}B) -- drift accumulated "
+                    f"across passes, even if this one pass is within its own limit"
+                )
+            if -drift_pct > max_cum_shrink:
+                return self._fail(
+                    f"cumulative shrink {-drift_pct:.1f}% exceeds {max_cum_shrink:g}% limit "
+                    f"vs the original {original_size}B (now {size_bytes}B) -- erosion accumulated "
+                    f"across passes, even if this one pass is within its own limit"
+                )
 
         # Frontmatter is only a meaningful check against a full skill-file body --
         # a description-only change or a summary+rationale fallback (merge_skills,
@@ -686,6 +764,25 @@ def target_key_for_proposal(proposal: Any) -> str:
     return f"skill:{target_skill}" if target_skill else f"proposal:{proposal_id}"
 
 
+def _extract_evaluated_content(proposal: Any) -> Tuple[str, str, Optional[str]]:
+    """Return (content, content_kind, baseline) for the text a proposal wants evaluated.
+
+    Shared by evaluate_skill_text() and evaluate_and_record() so the sizes recorded in
+    history are measured over exactly the text that was scored -- deriving them twice
+    from the proposal shape would let the two drift apart.
+
+    Falls back to summary+rationale for proposal shapes with no single body/description
+    field (e.g. merge_skills) so nothing is silently skipped.
+    """
+    for change in getattr(proposal, "proposed_changes", []):
+        if getattr(change, "field", None) in ("body", "description") and getattr(change, "new_value", None):
+            return change.new_value, change.field, getattr(change, "old_value", None)
+
+    summary = getattr(proposal, "summary", "")
+    rationale = getattr(proposal, "rationale", "")
+    return f"{summary}\n\n{rationale}", "summary_rationale", None
+
+
 def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     """Evaluate a proposal's skill-text content end to end.
 
@@ -696,21 +793,7 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     evaluators and gate combination.
     """
     target = target_key_for_proposal(proposal)
-
-    content = None
-    content_kind = "body"
-    baseline = None
-    for change in getattr(proposal, "proposed_changes", []):
-        if getattr(change, "field", None) in ("body", "description") and getattr(change, "new_value", None):
-            content = change.new_value
-            content_kind = change.field
-            baseline = getattr(change, "old_value", None)
-            break
-    if content is None:
-        summary = getattr(proposal, "summary", "")
-        rationale = getattr(proposal, "rationale", "")
-        content = f"{summary}\n\n{rationale}"
-        content_kind = "summary_rationale"
+    content, content_kind, baseline = _extract_evaluated_content(proposal)
 
     context = {"content_kind": content_kind}
     # DeterministicEvaluator's growth-vs-baseline guard is inert unless it gets
@@ -720,6 +803,12 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # rather than dividing by a zero baseline.
     if baseline:
         context["baseline_size"] = len(baseline.encode("utf-8"))
+
+    # Second reference point: where this target started, so drift spread across several
+    # individually-compliant passes is still caught. Absent history leaves it inert.
+    original = original_size_for_target(target)
+    if original:
+        context["original_size"] = original
 
     return run_evaluators(content, target, context=context)
 
@@ -746,7 +835,14 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None) 
     )
 
     resolved_session_ids = session_ids if session_ids is not None else getattr(proposal, "session_ids", [])
-    append_history(target, combined_result, session_ids=resolved_session_ids)
+    # Record the sizes this decision was made over, so original_size_for_target() can
+    # later measure cumulative drift against where the target started.
+    content, _, baseline = _extract_evaluated_content(proposal)
+    append_history(
+        target, combined_result, session_ids=resolved_session_ids,
+        content_size=len(content.encode("utf-8")),
+        baseline_size=len(baseline.encode("utf-8")) if baseline else None,
+    )
 
     return eval_results, combined_result, gate_passed
 
