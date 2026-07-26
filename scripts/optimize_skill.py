@@ -300,11 +300,50 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     return gepa_api.optimize_anything(
         seed_candidate=seed_body,
         evaluator=bound_evaluator,
-        objective=(
-            "Improve this Hermes Agent skill's instructions based on how it performed "
-            "in real recorded sessions."
-        ),
+        objective=_build_objective(seed_body),
         config=config,
+    )
+
+
+def _build_objective(seed_body: str) -> str:
+    """The instruction gepa's reflection LM optimizes against.
+
+    Carries the byte budget the deterministic gate will enforce, derived from the same
+    env-configurable limits, so the search stays inside the constraint instead of
+    discovering it after the run. Without this the objective mentioned only the task: a
+    real run converged on a +121.8% candidate that was inadmissible from the first byte,
+    spending its whole metric-call budget on candidates the gate had to discard.
+
+    This is a *soft* defence -- a prompt the model may ignore -- so it does not replace
+    DeterministicEvaluator's hard check. Its value is not wasting budget.
+
+    The heading instruction targets the other observed failure mode: a candidate that
+    scored higher by deleting 17 of 29 sections, including the skill's own
+    "Red Flags"/"Anti-Patterns" guardrails.
+    """
+    import evaluate
+
+    base = len(seed_body.encode("utf-8"))
+    max_growth = float(os.environ.get(evaluate.MAX_GROWTH_PCT_ENV_VAR,
+                                      evaluate.DEFAULT_MAX_GROWTH_PCT))
+    max_shrink = float(os.environ.get(evaluate.MAX_SHRINK_PCT_ENV_VAR,
+                                      evaluate.DEFAULT_MAX_SHRINK_PCT))
+    lower = int(base * (1 - max_shrink / 100))
+    upper = int(base * (1 + max_growth / 100))
+
+    return (
+        # Deliberately agent-neutral: the same skill-body optimization applies to any
+        # agent whose sessions and skills this pipeline can read (Hermes today; Codex,
+        # Claude Code and others if the source adapters below are generalized). Naming a
+        # specific host here would also bias the reflection LM's rewrites toward that
+        # host's conventions.
+        "Improve this agent skill's instructions based on how it performed "
+        "in real recorded sessions.\n\n"
+        f"HARD SIZE BUDGET: the current body is {base} bytes. Your revision must be "
+        f"between {lower} and {upper} bytes (at most -{max_shrink:g}% / +{max_growth:g}%). "
+        "A revision outside that range is rejected outright, however good it is.\n"
+        "Preserve every existing section heading unless it is genuinely redundant; "
+        "deleting guidance to save space is not an improvement."
     )
 
 
@@ -341,12 +380,23 @@ def _resolve_baseline_size_bytes(skill_name: str) -> Optional[int]:
     skipped gracefully instead of blocking the structural gate on an unrelated lookup
     failure.
     """
+    body = _installed_body(skill_name)
+    return None if body is None else len(body.encode("utf-8"))
+
+
+def _installed_body(skill_name: str) -> Optional[str]:
+    """Best-effort text of `skill_name`'s currently installed SKILL.md.
+
+    Returns None (rather than raising) when the skill can't be resolved -- no match, an
+    ambiguous match across categories, or a read failure -- so callers degrade to
+    "no baseline available" instead of failing the whole draft on an unrelated lookup.
+    """
     matches = _find_skill_matches(skill_name)
     if len(matches) != 1:
         return None
     try:
         with open(matches[0]["path"], encoding="utf-8") as f:
-            return len(f.read().encode("utf-8"))
+            return f.read()
     except OSError:
         return None
 
@@ -439,6 +489,12 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
                 "session evidence -- review the full body below before approving, the same as "
                 "any other automated candidate."
             ),
+            # Carry the installed body as old_value so the size guards stay live at the
+            # gate too: evaluate_skill_text() derives baseline_size from it, and without
+            # it apply_proposal()'s growth/shrink checks are silently inert for
+            # optimizer-drafted proposals (they'd only ever run here, at draft time).
+            # It also gives a human reviewer a real before/after to read.
+            old_value=_installed_body(skill_name),
             new_value=result.best_candidate,
         )],
     )
