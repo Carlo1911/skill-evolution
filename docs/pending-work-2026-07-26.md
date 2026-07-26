@@ -3,7 +3,7 @@
 Built by reading every document in the repo (`CLAUDE.md`, `README.md`, `SKILL.md`,
 `docs/integration-plan.md`, `docs/session-analyzer-prompt.md`, all three plans under
 `docs/plans/`, and `docs/pending-work.md`) and cross-checking each deferred item against
-the code as it stands after today's commits (`a5e754d`..`13fd4bd`).
+the code as it stands after today's commits (`a5e754d`..`5bd781f`).
 
 **Relationship to `docs/pending-work.md`:** that file stays as the *evidence record* — the
 Fase 0 validation narrative, the measured numbers, the retracted conclusion, the bug
@@ -17,9 +17,11 @@ Test baseline: **351 passed** with `gepa` installed, **347 passed + 1 skipped** 
 
 ---
 
-## P0 — Production and security
+## P0 — Production and security — all three RESOLVED 2026-07-26
 
-Nothing else in this document is urgent. These three are.
+These were the only urgent items in this document, and none remain open. Each is kept with
+its original finding collapsed underneath, because the *reason* each was urgent is the part
+worth not forgetting.
 
 ### ~~P0-1. Production runs a different, older copy of the pipeline~~ — RESOLVED 2026-07-26
 
@@ -276,6 +278,8 @@ documented best-effort behaviour rather than a failure.
 size guards stay live at the gate, but no test asserts it (`grep old_value tests/` →
 nothing). The docstring's claim is unverified, and a regression would silently return the
 optimizer to draft-time-only checking.
+
+</details>
 
 ---
 
