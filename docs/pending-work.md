@@ -111,14 +111,26 @@ left out of that work's scope, then addressed by
   mechanism (KD2) — so a paraphrased (non-verbatim) injection is still a live
   residual risk, just a narrower one than before.
 - **Optimizer defaults were unvalidated against real usage.** *(Made
-  configurable, not yet tuned.)* `MIN_SESSIONS`, `DEFAULT_MAX_METRIC_CALLS`,
-  and `DEFAULT_MAX_SESSIONS_FOR_SKILL` are now overridable via
-  `SKILL_EVOLUTION_OPTIMIZER_MIN_SESSIONS`,
+  configurable in the hardening pass; `DEFAULT_MAX_METRIC_CALLS` tuned
+  2026-07-26 against the three Fase 0 runs below — RESOLVED for that
+  constant, still open for the other two.)* `MIN_SESSIONS`,
+  `DEFAULT_MAX_METRIC_CALLS`, and `DEFAULT_MAX_SESSIONS_FOR_SKILL` are
+  overridable via `SKILL_EVOLUTION_OPTIMIZER_MIN_SESSIONS`,
   `SKILL_EVOLUTION_OPTIMIZER_MAX_METRIC_CALLS`, and
-  `SKILL_EVOLUTION_OPTIMIZER_MAX_SESSIONS_FOR_SKILL`, with today's values
-  (3 / 20 / 20) kept as defaults. Actually tuning those numbers against real
-  usage data is still unstarted — see "GEPA optimizer: shipped but not yet
-  run for real" below.
+  `SKILL_EVOLUTION_OPTIMIZER_MAX_SESSIONS_FOR_SKILL`. Of the three, only
+  `DEFAULT_MAX_METRIC_CALLS` had load-bearing evidence behind it — see
+  "Size limits vs. the optimizer: three runs, not one" below: the
+  `money-admin-messaging` run (`--iterations 4`) took 2+ minutes wall-clock
+  against `big-pickle` (30s+/metric-call) and already found both a real
+  score gain and the pathological growth failure inside those 4 calls, so
+  the old default of 20 meant a 10+ minute unattended foreground call by
+  default for a manual, non-cron operation. Moved 20 → 8 (2x the
+  empirically-sufficient count). `MIN_SESSIONS` (3) and
+  `DEFAULT_MAX_SESSIONS_FOR_SKILL` (20) are unchanged: none of the three
+  runs tested `MIN_SESSIONS`'s boundary, and both 8- and 20-session
+  trainsets ran fine, so neither has evidence pointing anywhere in
+  particular. Still real judgment calls, just no longer *uninformed* ones
+  for the constant that had a concrete cost signal.
 
 ## Fase 0 validation pass (2026-07-26): what real data proved
 
@@ -190,6 +202,20 @@ Claude/Ollama deployments behind similar gateways too. Fixed by sending
 `USER_AGENT = "hermes-skill-evolution/0.1"` (caller-overridable). Diagnostic
 worth remembering: when a provider 403s but `curl` succeeds, suspect the UA
 before the key.
+
+**Follow-up, 2026-07-26: verified against a real local Ollama server.** Its endpoint turned
+out not to gate on User-Agent at all (both the old and new UA returned 200), so the
+"Claude/Ollama deployments behind similar gateways too" worry above did not materialize for
+Ollama specifically — the fix is confirmed harmless there, not confirmed necessary. The pass
+went further than `curl`: `LLMJudgeEvaluator.evaluate()` → `_call_ollama()` → `_post_json()`
+scored a real installed skill (`systematic-debugging`, 15,325B) via `gemma4` at 0.98, and the
+full `deterministic` + `llm_judge` gate ran end to end and correctly reported FAILED
+(deterministic legitimately rejected the candidate on the absolute cap; see the ratchet
+section above). Unrelated finding surfaced by the same pass: the judge call took 54–56s of
+the 60s default timeout with `gemma4`, and `qwen3.5` timed out outright on the same
+prompt — local reasoning models spend a large share of their output on chain-of-thought
+before the JSON, which a hosted API typically doesn't do. Claude remains unverified; no
+`ANTHROPIC_API_KEY` was available in this environment.
 
 **The GEPA loop ran for real, end to end.**
 `--skill money-admin-messaging --iterations 4` on `big-pickle`, exit 0. Every
@@ -286,10 +312,38 @@ model may ignore — so it complements rather than replaces the hard check; the
 point is not spending a metric-call budget on candidates that are inadmissible
 from the first byte.
 
-Percentage limits remain weakest where damage is largest: 20% of the median
-9,748B skill is ~1.9KB (several sections), and 20% of the largest (102KB) is
-20KB. An absolute byte floor alongside the percentages is the natural next step
-if that proves too loose in practice.
+*Percentage limits remained weakest where damage is largest — now fixed.* The
+numbers in the original note were stale in two ways: the per-pass floor settled
+at 15%, not 20%, and a proper census of the tree (143 skills, median **9,954B**,
+max **103,656B** `research-paper-writing`) shows one pass could delete
+**15,548B** from the largest skill while reporting a compliant −15.0%.
+`SKILL_EVOLUTION_MAX_SHRINK_BYTES` (default **2048**, `0` disables) now bounds
+that, as a second sequential check after the percentage so the feedback names
+whichever limit actually bound. The default is the crossover rather than a
+preference: `2048/0.15 = 13,653B`, just under the 15,360B cap, so the byte floor
+is inert for essentially every within-cap skill by construction and operative
+precisely on the oversized tail. It binds 35 of 143.
+
+*The absolute cap became a ratchet in the same change.* A flat ceiling rejected
+**22 of 143** skills' body proposals regardless of direction — a proposal
+shrinking one toward compliance drew the byte-identical message as one growing
+it, so the gate could not tell improvement from worsening. It now fails only when
+the candidate is over the cap *and* larger than the baseline it replaces;
+`create_new` has no baseline and keeps the strict cap, so a skill is never born
+oversized. **The two are causally coupled:** that 15,548B deletion was previously
+masked (the shrunk candidate was still over the cap and failed there first), so
+the ratchet alone would have been a net regression in deletion safety. They
+shipped together, byte floor first.
+
+Growth needs no byte counterpart — per-pass absolute growth is bounded at
+`cap × g/(1+g)` = 2,560B within the cap, and at 0 for an oversized skill under the
+ratchet. Note that invariant *scales with the cap*, so revisit if
+`SKILL_EVOLUTION_MAX_SKILL_SIZE_KB` ever moves.
+
+Honest limitation: this makes oversized skills **improvable, not downsizable**.
+At 2048B/pass, walking `research-paper-writing` from 103,656B to compliance would
+take ~44 approved passes. A skill that large still needs a human to split it; the
+env var is the escape hatch for a deliberate consolidation run.
 
 ```bash
 pip install -e ".[dev,optimizer]"

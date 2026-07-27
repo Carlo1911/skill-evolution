@@ -104,6 +104,7 @@ def get_enabled_evaluators(env_value: Optional[str] = None) -> List[Evaluator]:
 
 HISTORY_RETENTION_ENV_VAR = "SKILL_EVOLUTION_HISTORY_RETENTION"
 HISTORY_PATH_ENV_VAR = "SKILL_EVOLUTION_HISTORY_PATH"
+HISTORY_ARCHIVE_PATH_ENV_VAR = "SKILL_EVOLUTION_HISTORY_ARCHIVE_PATH"
 
 
 def get_history_path() -> str:
@@ -115,6 +116,24 @@ def get_history_path() -> str:
     """
     default = os.path.join(os.getcwd(), "docs", "skill-evolution", "eval_history.jsonl")
     return os.environ.get(HISTORY_PATH_ENV_VAR, default)
+
+
+def get_history_archive_path(history_path: Optional[str] = None) -> str:
+    """Return the file prune_history() archives dropped entries to.
+
+    Defaults to a sibling of `history_path` (or get_history_path() when omitted), inserting
+    ".archive" before the extension -- eval_history.jsonl -> eval_history.archive.jsonl.
+    Derived from the *primary* path's basename rather than a fixed filename: the primary
+    path is itself overridable (SKILL_EVOLUTION_HISTORY_PATH) and tests pass a
+    tmp_path-scoped custom path, so a fixed name would still work today (there's exactly one
+    canonical history file) but would silently collide if that ever changes. Overridable
+    independently via SKILL_EVOLUTION_HISTORY_ARCHIVE_PATH.
+    """
+    primary = history_path or get_history_path()
+    directory, filename = os.path.split(primary)
+    stem, ext = os.path.splitext(filename)
+    default = os.path.join(directory, f"{stem}.archive{ext}")
+    return os.environ.get(HISTORY_ARCHIVE_PATH_ENV_VAR, default)
 
 
 def append_history(target: str, result: EvalResult, session_ids: Optional[List[str]] = None,
@@ -205,10 +224,32 @@ def _parse_retention(raw: Optional[str]):
     return ("count", int(value))
 
 
-def prune_history(path: Optional[str] = None, retention: Optional[str] = None) -> None:
+def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
+                   archive_path: Optional[str] = None) -> None:
     """Prune the shared history file per SKILL_EVOLUTION_HISTORY_RETENTION.
 
-    Always retains the most recent entry per target regardless of the limit.
+    Per target, always retains up to three anchor entries regardless of the configured
+    limit, on top of whatever the count/age window itself keeps -- so the retained count per
+    target can exceed the limit by up to two entries. That's intentional:
+
+    - The most recent entry -- needed by optimize_skill.find_low_scoring_targets(), which
+      wants exactly this and is otherwise unaffected by pruning.
+    - The most recent *passing* entry -- RegressionEvaluator baselines against the last
+      entry with passed=True, not just the last entry. Without this anchor, a passing
+      baseline followed by several failing retries could have the passing entry pruned
+      while the failures (chronologically newer) survive, silently disabling regression
+      coverage for exactly the targets that most need it.
+    - The earliest entry -- original_size_for_target() reads it as the cumulative-drift
+      baseline. Without this anchor, trimming a target's oldest entries would silently
+      shift that baseline forward, forgiving prior drift.
+
+    Anchors are deduplicated by identity when they coincide (e.g. a target with no failures
+    has most-recent == last-passing).
+
+    Pruned entries are archived, not discarded: appended to get_history_archive_path()
+    *before* the primary file is rewritten, so a crash mid-prune loses nothing -- "still in
+    the primary, archive write pending" is recoverable on the next prune; the reverse order
+    would not be. Only touches the archive file when something is actually dropped.
     """
     history_path = path or get_history_path()
     raw_retention = retention if retention is not None else os.environ.get(HISTORY_RETENTION_ENV_VAR)
@@ -227,9 +268,8 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None) -
     kept: List[Dict[str, Any]] = []
     kind, limit = rule
     for target_entries in by_target.values():
-        most_recent = target_entries[-1]
         if kind == "count":
-            survivors = target_entries[-int(limit):] if limit > 0 else [most_recent]
+            survivors = target_entries[-int(limit):] if limit > 0 else []
         else:
             cutoff = datetime.now(timezone.utc).timestamp() - (limit * 86400)
             survivors = []
@@ -240,13 +280,34 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None) -
                     ts = 0
                 if ts >= cutoff:
                     survivors.append(entry)
-        if most_recent not in survivors:
-            survivors.append(most_recent)
+
+        anchors = [target_entries[-1]]  # most recent
+        last_passing = next((e for e in reversed(target_entries) if e.get("passed")), None)
+        if last_passing is not None:
+            anchors.append(last_passing)
+        anchors.append(target_entries[0])  # earliest
+
+        survivor_ids = {id(e) for e in survivors}
+        for anchor in anchors:
+            if id(anchor) not in survivor_ids:
+                survivors.append(anchor)
+                survivor_ids.add(id(anchor))
+
         kept.extend(survivors)
 
     # Preserve original relative ordering
     kept_ids = {id(e) for e in kept}
     ordered_kept = [e for e in entries if id(e) in kept_ids]
+    ordered_pruned = [e for e in entries if id(e) not in kept_ids]
+
+    if ordered_pruned:
+        archive_file = archive_path or get_history_archive_path(history_path)
+        archive_dir = os.path.dirname(archive_file)
+        if archive_dir:
+            os.makedirs(archive_dir, exist_ok=True)
+        with open(archive_file, "a") as f:
+            for entry in ordered_pruned:
+                f.write(json.dumps(entry) + "\n")
 
     with open(history_path, "w") as f:
         for entry in ordered_kept:
@@ -433,6 +494,20 @@ DEFAULT_MAX_GROWTH_PCT = 20.0
 # sections). 15% also keeps a single pass's bite small -- ~1.4KB of a median 9.7KB skill
 # rather than ~1.9KB. Override with SKILL_EVOLUTION_MAX_SHRINK_PCT.
 DEFAULT_MAX_SHRINK_PCT = 15.0
+# The percentage floor above is weakest exactly where a deletion does the most damage: 15%
+# of the median 9,954B skill is ~1.5KB, but 15% of the largest installed one (103,656B) is
+# 15,548B -- an entire median skill's worth of guidance removable in a single pass. This
+# absolute companion bounds that blast radius in bytes; the *stricter* of the two applies.
+# 2048 is chosen from the crossover, not from taste: the byte floor binds only above
+# 2048/0.15 = 13,653B, just under the 15,360B absolute cap, so it is inert for essentially
+# every skill that is within the cap and operative precisely on the oversized tail that the
+# cap's ratchet (see DeterministicEvaluator.evaluate) unblocks. Measured over the real
+# 143-skill tree it binds 35 of them. Set to 0 to disable and fall back to percentage-only,
+# which is the escape hatch for a deliberate consolidation pass.
+# Read with env_int, not env_float: a fractional byte is meaningless, and env_int treats
+# "2048.0" as malformed rather than silently truncating it.
+MAX_SHRINK_BYTES_ENV_VAR = "SKILL_EVOLUTION_MAX_SHRINK_BYTES"
+DEFAULT_MAX_SHRINK_BYTES = 2048
 # Second reference point, against a target's *original* recorded size rather than the body
 # it immediately replaces. The per-pass limits above reset their reference every pass, so
 # they compound: at 20% per pass, four accepted passes halve a skill while each one looks
@@ -476,10 +551,32 @@ class DeterministicEvaluator(Evaluator):
         size_bytes = len(content.encode("utf-8"))
         max_kb = env_float(MAX_SKILL_SIZE_KB_ENV_VAR, DEFAULT_MAX_SKILL_SIZE_KB)
         max_bytes = max_kb * 1024
-        if size_bytes > max_bytes:
-            return self._fail(f"size {size_bytes}B exceeds {int(max_bytes)}B limit ({max_kb:g}KB)")
-
+        # Read before the cap check: the cap is a *ratchet*, not a flat ceiling, and needs
+        # to know what the candidate replaces.
         baseline_size = context.get("baseline_size")
+        # The rule is "a change that replaces existing text may not worsen; a change that
+        # creates text faces the hard cap". So an over-limit candidate is rejected unless it
+        # is no larger than the body it replaces -- 22 of the 143 installed skills already
+        # exceed the cap, and a flat ceiling rejected a proposal *shrinking* one of them
+        # toward compliance with the identical message as one growing it, i.e. the gate
+        # could not tell improvement from worsening. create_new carries no baseline, so it
+        # keeps the strict cap and a skill is never born oversized; that exemption is a
+        # consequence of the rule, not a special case to "fix" with a proposal-type check.
+        # `not (baseline_size and ...)` rather than comparing directly, because baseline_size
+        # is None for create_new and `size_bytes > None` is a TypeError; a 0 baseline
+        # likewise keeps the strict cap, matching the `if baseline_size:` gating below.
+        # `<=` admits an equal-size candidate: a pure rewrite of an oversized skill is the
+        # most valuable thing this unblocks, and is exactly what _build_objective() tells
+        # the reflection LM to produce when no size headroom is left.
+        if size_bytes > max_bytes and not (baseline_size and size_bytes <= baseline_size):
+            over = f"size {size_bytes}B exceeds {int(max_bytes)}B limit ({max_kb:g}KB)"
+            if baseline_size:
+                return self._fail(
+                    f"{over} and is larger than the {baseline_size}B it replaces -- an "
+                    f"over-limit skill may only be replaced by a body no larger than itself"
+                )
+            return self._fail(f"{over} -- a new skill must not be created over the limit")
+
         if baseline_size:
             delta_pct = ((size_bytes - baseline_size) / baseline_size) * 100
             max_growth = env_float(MAX_GROWTH_PCT_ENV_VAR, DEFAULT_MAX_GROWTH_PCT)
@@ -490,6 +587,20 @@ class DeterministicEvaluator(Evaluator):
                 return self._fail(
                     f"shrink {-delta_pct:.1f}% exceeds {max_shrink:g}% limit below baseline "
                     f"({baseline_size}B -> {size_bytes}B) -- a large deletion needs human review"
+                )
+            # The absolute companion to the percentage floor, checked second so that skills
+            # where the percentage is the operative limit (everything under ~13.6KB) keep
+            # reporting the familiar percentage message, and only the large tail reports
+            # bytes. Two sequential checks rather than one min() of the allowances: the
+            # behaviour is identical, but this way the feedback names the limit that
+            # actually bound.
+            max_shrink_bytes = env_int(MAX_SHRINK_BYTES_ENV_VAR, DEFAULT_MAX_SHRINK_BYTES)
+            removed = baseline_size - size_bytes
+            if max_shrink_bytes > 0 and removed > max_shrink_bytes:
+                return self._fail(
+                    f"shrink {removed}B exceeds the {max_shrink_bytes}B absolute per-pass "
+                    f"limit ({baseline_size}B -> {size_bytes}B) -- a percentage floor alone "
+                    f"scales with the skill, so a large one could shed several KB in one pass"
                 )
 
         original_size = context.get("original_size")
@@ -789,6 +900,58 @@ def _extract_evaluated_content(proposal: Any) -> Tuple[str, str, Optional[str]]:
     return f"{summary}\n\n{rationale}", "summary_rationale", None
 
 
+def installed_skill_body(skill_name: str) -> Optional[str]:
+    """Best-effort text of `skill_name`'s currently installed SKILL.md, or None.
+
+    Returns None rather than raising when the skill cannot be resolved -- no match, an
+    ambiguous match across categories (the `.archive/` twin case skill_index guards
+    against), or a read failure -- so callers degrade to whatever baseline they already
+    had instead of failing a gate decision on an unrelated lookup.
+
+    skill_index is imported locally and scan_skills() is called as an attribute so tests
+    that monkeypatch skill_index.scan_skills are observed; a module-scope
+    `from skill_index import scan_skills` would bind past the patch.
+    """
+    import skill_index
+
+    matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
+    if len(matches) != 1:
+        return None
+    try:
+        with open(matches[0]["path"], encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _resolve_baseline(proposal: Any, content_kind: str, claimed: Optional[str]) -> Optional[str]:
+    """Return the text a body change actually replaces, preferring disk over the proposal.
+
+    `claimed` is the change's `old_value`, which the analyzer LLM writes
+    (session-analyzer-prompt.md asks it to emit the current value) and proposal.py persists
+    verbatim -- proposal-supplied input, not an observation. That matters because the size
+    cap is a ratchet: an inflated old_value would raise the ceiling it is checked against,
+    letting a proposal that claims a 951KB baseline ship a 950KB body past a 15KB cap.
+    Reading the installed file makes the baseline an observation again.
+    optimize_skill._resolve_baseline_size_bytes() already applies this distrust at draft
+    time; this is the same discipline at the gate.
+
+    Body changes only: for a description change the installed *file* is not what the
+    description replaces, and substituting it would make every description edit look like a
+    ~-98% shrink. Unresolvable skill -> fall back to `claimed`, matching this repo's
+    degrade-don't-block posture rather than failing a gate decision on a lookup miss.
+
+    Shared by evaluate_skill_text() and evaluate_and_record() for the same reason
+    _extract_evaluated_content() is shared: resolving the baseline twice would let the size
+    the gate judged and the size recorded in history drift apart, and
+    original_size_for_target() reads that recorded size back as the cumulative reference.
+    """
+    if content_kind != "body":
+        return claimed
+    installed = installed_skill_body(getattr(proposal, "target_skill", None) or "")
+    return claimed if installed is None else installed
+
+
 def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     """Evaluate a proposal's skill-text content end to end.
 
@@ -806,7 +969,10 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # baseline_size, so a change replacing existing text must carry the size of the text
     # it replaces. Measured the same way the evaluator measures the candidate (utf-8
     # bytes). create_new has no old_value: the key stays absent and the guard stays inert
-    # rather than dividing by a zero baseline.
+    # rather than dividing by a zero baseline. _resolve_baseline() prefers the installed
+    # skill over the proposal's own claim -- see its docstring for why that matters now
+    # that the cap is a ratchet.
+    baseline = _resolve_baseline(proposal, content_kind, baseline)
     if baseline:
         context["baseline_size"] = len(baseline.encode("utf-8"))
 
@@ -819,11 +985,23 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     return run_evaluators(content, target, context=context)
 
 
-def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None) -> Tuple[List[EvalResult], EvalResult, bool]:
+def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
+                         auto_prune: bool = True) -> Tuple[List[EvalResult], EvalResult, bool]:
     """Run the evaluation gate for `proposal` and append the combined result to history.
 
     Shared by proposal.py's apply_proposal() and retroactive_reevaluate() so both
     record identical gate semantics against a target's history.
+
+    `auto_prune` calls prune_history() right after the append -- a no-op by default, since
+    prune_history() itself early-returns unless SKILL_EVOLUTION_HISTORY_RETENTION is
+    configured. This is what makes retention actually apply automatically rather than only
+    via a manually-run `--prune`: the same env var now controls both whether pruning
+    happens and that it happens on every real evaluation from now on. apply_proposal()'s
+    single call per invocation keeps the default; retroactive_reevaluate() passes False and
+    prunes once after its whole batch instead -- prune_history() does a full read+rewrite of
+    the *shared* history file (every target, not just this one), so N proposals pruning
+    after every single append would mean N full-file passes for a result identical to
+    pruning once at the end.
     """
     target = target_key_for_proposal(proposal)
     eval_results = evaluate_skill_text(proposal)
@@ -842,13 +1020,18 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None) 
 
     resolved_session_ids = session_ids if session_ids is not None else getattr(proposal, "session_ids", [])
     # Record the sizes this decision was made over, so original_size_for_target() can
-    # later measure cumulative drift against where the target started.
-    content, _, baseline = _extract_evaluated_content(proposal)
+    # later measure cumulative drift against where the target started. Resolved the same
+    # way evaluate_skill_text() resolved it above, so the size recorded is the size that
+    # was actually judged.
+    content, content_kind, baseline = _extract_evaluated_content(proposal)
+    baseline = _resolve_baseline(proposal, content_kind, baseline)
     append_history(
         target, combined_result, session_ids=resolved_session_ids,
         content_size=len(content.encode("utf-8")),
         baseline_size=len(baseline.encode("utf-8")) if baseline else None,
     )
+    if auto_prune:
+        prune_history()
 
     return eval_results, combined_result, gate_passed
 
@@ -907,13 +1090,18 @@ def retroactive_reevaluate(target: Optional[str] = None, since: Optional[str] = 
 
     summaries = []
     for p in proposals:
-        _, combined_result, gate_passed = evaluate_and_record(p)
+        # auto_prune=False: pruning after every append would mean one full read+rewrite of
+        # the shared history file per proposal in this batch. Pruned once, below, instead.
+        _, combined_result, gate_passed = evaluate_and_record(p, auto_prune=False)
         summaries.append({
             "target": target_key_for_proposal(p),
             "proposal_id": getattr(p, "proposal_id", None),
             "score": combined_result.score,
             "passed": gate_passed,
         })
+
+    if proposals:
+        prune_history()
 
     return summaries
 
@@ -931,9 +1119,12 @@ def main():
 
     if args.prune:
         before = len(_read_all_entries(get_history_path()))
+        archive_before = len(_read_all_entries(get_history_archive_path()))
         prune_history()
         after = len(_read_all_entries(get_history_path()))
-        print(f"Pruned history: {before} -> {after} entries")
+        archive_after = len(_read_all_entries(get_history_archive_path()))
+        print(f"Pruned history: {before} -> {after} entries "
+              f"({archive_after - archive_before} archived)")
         return
 
     if args.list_evaluators:

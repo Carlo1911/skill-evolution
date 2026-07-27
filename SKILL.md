@@ -137,10 +137,12 @@ instructions are for a human or agent to execute — `apply_proposal()` never ca
 
 Every auto-applied change must pass an evaluation gate (`scripts/evaluate.py`) before `apply_proposal()` calls `skill_manage`:
 
-- **Size limit**: Skills ≤ 15KB (`SKILL_EVOLUTION_MAX_SKILL_SIZE_KB`)
+- **Size limit**: Skills ≤ 15KB (`SKILL_EVOLUTION_MAX_SKILL_SIZE_KB`), applied as a **ratchet**: a skill already over the limit may still be replaced by a body *no larger than itself*, so an oversized skill can be improved but never made worse. A new skill (no baseline) faces the limit strictly and is never created over it. This makes oversized skills improvable, not downsizable — a very large skill still needs a human to split it
 - **Growth limit**: No more than 20% larger than baseline (`SKILL_EVOLUTION_MAX_GROWTH_PCT`)
 - **Structure**: Valid YAML frontmatter with `name:` and `description:`
 - **Shrink floor**: no more than 15% smaller than baseline (`SKILL_EVOLUTION_MAX_SHRINK_PCT`) — tighter than the growth cap on purpose, because the judge's conciseness criterion rewards deletion and a real optimizer run scored *higher* after cutting 70% of a skill
+- **Absolute deletion floor**: no more than 2048 bytes removed in a single pass (`SKILL_EVOLUTION_MAX_SHRINK_BYTES`; the stricter of this and the percentage floor applies, `0` disables). A percentage scales with the skill, so it is weakest where a deletion does most damage — 15% of a small skill is a paragraph, 15% of a 100KB one is several sections
+- **Baseline from disk**: size comparisons for a body change measure against the *installed* `SKILL.md`, not against the `old_value` the proposal reports, since that field is written by the analysing model
 - **Cumulative drift**: total change measured against where the skill *started*, not the body it replaces — 50% growth / 30% shrink (`SKILL_EVOLUTION_MAX_CUMULATIVE_GROWTH_PCT` / `_SHRINK_PCT`). Per-pass limits reset their reference each run and therefore compound; this bounds the total
 - **Rubric score**: An LLM judge scores correctness, procedure-following, and conciseness against a configurable threshold (`SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD`, default 0.7)
 - **No regression**: The new score must not fall below the target's last passing score in its evaluation history
@@ -175,9 +177,10 @@ No pip packages required beyond Python stdlib for the core pipeline. `gepa==0.1.
 |----------|---------|---------|
 | `SKILL_EVOLUTION_EVALUATORS` | `deterministic,llm_judge,regression` | Which evaluators run |
 | `SKILL_EVOLUTION_GATE_STRICTNESS` | `strict` | `strict` (all must pass) or `majority`; per-type override via `SKILL_EVOLUTION_GATE_STRICTNESS_<TYPE>` |
-| `SKILL_EVOLUTION_MAX_SKILL_SIZE_KB` | `15` | Deterministic size limit |
+| `SKILL_EVOLUTION_MAX_SKILL_SIZE_KB` | `15` | Absolute size limit, applied as a ratchet: an over-limit skill may still be replaced by a body no larger than itself; a new skill may not be created over it |
 | `SKILL_EVOLUTION_MAX_GROWTH_PCT` | `20` | Per-pass growth-vs-baseline limit |
 | `SKILL_EVOLUTION_MAX_SHRINK_PCT` | `15` | Per-pass shrink floor (tighter than growth on purpose) |
+| `SKILL_EVOLUTION_MAX_SHRINK_BYTES` | `2048` | Absolute per-pass deletion limit; the stricter of this and the percentage floor applies. `0` disables it |
 | `SKILL_EVOLUTION_MAX_CUMULATIVE_GROWTH_PCT` | `50` | Total growth vs the skill's *original* recorded size |
 | `SKILL_EVOLUTION_MAX_CUMULATIVE_SHRINK_PCT` | `30` | Total shrink vs the original; bounds compounding erosion |
 | `SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD` | `0.7` | Minimum average rubric score to pass |
@@ -189,12 +192,15 @@ No pip packages required beyond Python stdlib for the core pipeline. `gepa==0.1.
 | `SKILL_EVOLUTION_OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | Zen carries `big-pickle` and the `*-free` models; the Go tier (`/zen/go/v1`) is a different, smaller catalogue — point this at the tier matching your model id |
 | `SKILL_EVOLUTION_OPENCODE_MODEL` | `big-pickle` | Model id from the chosen catalogue |
 | `SKILL_EVOLUTION_HISTORY_PATH` | `docs/skill-evolution/eval_history.jsonl` | Shared eval history file |
-| `SKILL_EVOLUTION_HISTORY_RETENTION` | unbounded | Max versions (bare int) or age (`90d`, `6mo`); always keeps the latest entry per target |
+| `SKILL_EVOLUTION_HISTORY_RETENTION` | unbounded | Max versions (bare int) or age (`90d`, `6mo`); always keeps up to 3 anchor entries per target (most recent, most recent passing, earliest); applies automatically after every evaluation, not just via `--prune` |
+| `SKILL_EVOLUTION_HISTORY_ARCHIVE_PATH` | sibling of the history file (`eval_history.archive.jsonl`) | Where entries pruned by the above are moved, not deleted |
 | `SKILL_EVOLUTION_PROPOSALS_DIR` | `docs/skill-evolution/proposals` | Where proposals are written |
+| `SKILL_EVOLUTION_STATE_FILE` | `~/.hermes/skill_evolution_state.json` | Which sessions have already been analyzed; override to run against isolated state |
+| `SKILL_EVOLUTION_STATE_RETENTION` | unbounded | Max processed-session entries (bare int) or age (`90d`, `6mo`); flat-dict state shape only (see below); applies automatically, and via `fetch_sessions.py --prune-state` |
 | `SKILL_EVOLUTION_AUTO_APPLY` / `_MIN_CONFIDENCE` | `false` / `0.85` | Inputs to `apply_proposal()`; the analysis session never self-applies regardless |
 | `SKILL_EVOLUTION_OPTIMIZER_ENABLED` | `false` | Enables `scripts/optimize_skill.py` |
 | `SKILL_EVOLUTION_OPTIMIZER_MIN_SESSIONS` | `3` | Minimum recorded sessions before the optimizer will run for a skill |
-| `SKILL_EVOLUTION_OPTIMIZER_MAX_METRIC_CALLS` | `20` | GEPA metric-call budget per run |
+| `SKILL_EVOLUTION_OPTIMIZER_MAX_METRIC_CALLS` | `8` | GEPA metric-call budget per run (tuned 2026-07-26 from real-run cost data; `--iterations` always overrides) |
 | `SKILL_EVOLUTION_OPTIMIZER_MAX_SESSIONS_FOR_SKILL` | `20` | Cap on sessions fed to the optimizer as trainset |
 
 A malformed numeric value falls back to the default and says so on stderr, rather than

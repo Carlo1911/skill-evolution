@@ -27,7 +27,9 @@ def clean_env(monkeypatch):
                 optimize_skill.MIN_SESSIONS_ENV_VAR,
                 optimize_skill.MAX_METRIC_CALLS_ENV_VAR,
                 "SKILL_EVOLUTION_MAX_GROWTH_PCT",
-                "SKILL_EVOLUTION_MAX_SHRINK_PCT"):
+                "SKILL_EVOLUTION_MAX_SHRINK_PCT",
+                "SKILL_EVOLUTION_MAX_SHRINK_BYTES",
+                "SKILL_EVOLUTION_MAX_SKILL_SIZE_KB"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -226,3 +228,98 @@ def test_objective_says_so_when_no_room_is_left(tmp_path, monkeypatch):
 
     assert re.search(r"no admissible|already (?:beyond|past|exceeds)|cannot be improved",
                      objective, re.IGNORECASE), objective
+
+
+# ── The absolute cap and the byte floor belong in the window too ─────────
+# _build_objective() intersected only the two *percentage* windows and never read
+# MAX_SKILL_SIZE_KB, so for the largest installed skill (103,656B) it advertised an upper
+# bound of ~124KB that the gate rejects outright -- the same objective-vs-constraint
+# mismatch, in a third form. All four constraints are now intersected before branching.
+
+def _plain(tmp_path, monkeypatch, seed):
+    """Build the objective for `seed` with no recorded history (cumulative half inert)."""
+    import evaluate
+    monkeypatch.setattr(evaluate, "get_history_path",
+                        lambda: str(tmp_path / "empty_history.jsonl"))
+    return optimize_skill._build_objective(seed, "demo")
+
+
+def _cap_bytes():
+    import evaluate
+    return int(evaluate.DEFAULT_MAX_SKILL_SIZE_KB * 1024)
+
+
+def test_objective_never_advertises_above_the_absolute_cap(tmp_path, monkeypatch):
+    """A compliant skill near the cap: the per-pass percentage would allow crossing it."""
+    seed = "x" * 14000
+    lower, upper = _stated_range(_plain(tmp_path, monkeypatch, seed))
+
+    assert int(14000 * 1.2) > _cap_bytes(), "fixture must make the cap the binding limit"
+    assert upper == _cap_bytes()
+
+
+def test_objective_explains_when_the_cap_is_what_binds(tmp_path, monkeypatch):
+    objective = _plain(tmp_path, monkeypatch, "x" * 14000)
+    assert "absolute limit" in objective
+
+
+def test_oversized_seed_gets_a_ratcheted_upper_bound(tmp_path, monkeypatch):
+    """An over-cap skill may not grow at all, so the window tops out at its current size."""
+    base = 103656
+    lower, upper = _stated_range(_plain(tmp_path, monkeypatch, "x" * base))
+
+    assert upper == base
+
+
+def test_oversized_seed_objective_says_it_cannot_grow(tmp_path, monkeypatch):
+    objective = _plain(tmp_path, monkeypatch, "x" * 103656)
+    assert "cannot be made" in objective and "no larger than" in objective
+
+
+def test_objective_lower_bound_respects_the_byte_floor(tmp_path, monkeypatch):
+    """On a 103KB body the percentage floor would allow shedding 15KB in one pass."""
+    import evaluate
+    base = 103656
+    lower, upper = _stated_range(_plain(tmp_path, monkeypatch, "x" * base))
+
+    assert lower == base - evaluate.DEFAULT_MAX_SHRINK_BYTES
+
+
+def test_objective_explains_the_byte_floor_when_it_binds(tmp_path, monkeypatch):
+    """Without the note the LM gets a 2KB-wide window on a 100KB body and no reason why."""
+    objective = _plain(tmp_path, monkeypatch, "x" * 103656)
+    assert "single pass" in objective
+
+
+def test_cap_and_cumulative_both_apply_without_an_early_return(tmp_path, monkeypatch):
+    """The old code returned from inside the cumulative block, so a window emptied by a
+    different constraint was never detected."""
+    seed = "x" * 14000
+    objective = _seeded(tmp_path, monkeypatch, 13000, seed)
+    lower, upper = _stated_range(objective)
+
+    import evaluate
+    cum_upper = int(13000 * (1 + evaluate.DEFAULT_MAX_CUMULATIVE_GROWTH_PCT / 100))
+    assert upper == min(_cap_bytes(), cum_upper)
+    assert lower == max(int(14000 * 0.85), 14000 - evaluate.DEFAULT_MAX_SHRINK_BYTES,
+                        int(13000 * (1 - evaluate.DEFAULT_MAX_CUMULATIVE_SHRINK_PCT / 100)))
+
+
+def test_empty_window_from_the_shrink_side_does_not_advise_rewriting_in_place(tmp_path, monkeypatch):
+    """A skill already below its cumulative floor cannot be fixed by a same-length rewrite
+    either -- that candidate fails the shrink check too. The single old message assumed the
+    growth side and was silently wrong here."""
+    objective = _seeded(tmp_path, monkeypatch, 10000, "x" * 5000)
+
+    assert "no admissible size" in objective
+    assert "within the current length" not in objective
+    assert "human attention" in objective
+
+
+def test_compliant_seed_window_is_unchanged(captured_objective):
+    """The regression signal that the four-way restructure preserved existing behaviour for
+    skills where neither the cap nor the byte floor binds."""
+    base = len(SEED.encode("utf-8"))
+    lower, upper = _stated_range(captured_objective)
+
+    assert (lower, upper) == (int(base * 0.85), int(base * 1.2))

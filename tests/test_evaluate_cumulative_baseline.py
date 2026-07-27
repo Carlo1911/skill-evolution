@@ -40,7 +40,8 @@ def clean_env(monkeypatch, tmp_path):
     for var in ("SKILL_EVOLUTION_MAX_GROWTH_PCT", "SKILL_EVOLUTION_MAX_SHRINK_PCT",
                 "SKILL_EVOLUTION_MAX_CUMULATIVE_GROWTH_PCT",
                 "SKILL_EVOLUTION_MAX_CUMULATIVE_SHRINK_PCT",
-                "SKILL_EVOLUTION_MAX_SKILL_SIZE_KB"):
+                "SKILL_EVOLUTION_MAX_SKILL_SIZE_KB",
+                "SKILL_EVOLUTION_MAX_SHRINK_BYTES"):
         monkeypatch.delenv(var, raising=False)
     path = str(tmp_path / "eval_history.jsonl")
     monkeypatch.setattr(evaluate, "get_history_path", lambda: path)

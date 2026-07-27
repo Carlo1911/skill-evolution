@@ -29,6 +29,7 @@ NUMERIC_VARS = [
     ("SKILL_EVOLUTION_MAX_SKILL_SIZE_KB", evaluate.DEFAULT_MAX_SKILL_SIZE_KB),
     ("SKILL_EVOLUTION_MAX_GROWTH_PCT", evaluate.DEFAULT_MAX_GROWTH_PCT),
     ("SKILL_EVOLUTION_MAX_SHRINK_PCT", evaluate.DEFAULT_MAX_SHRINK_PCT),
+    ("SKILL_EVOLUTION_MAX_SHRINK_BYTES", evaluate.DEFAULT_MAX_SHRINK_BYTES),
     ("SKILL_EVOLUTION_MAX_CUMULATIVE_GROWTH_PCT", evaluate.DEFAULT_MAX_CUMULATIVE_GROWTH_PCT),
     ("SKILL_EVOLUTION_MAX_CUMULATIVE_SHRINK_PCT", evaluate.DEFAULT_MAX_CUMULATIVE_SHRINK_PCT),
     ("SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD", evaluate.DEFAULT_LLM_JUDGE_THRESHOLD),
@@ -121,3 +122,16 @@ def test_sessions_for_skill_survives_malformed_cap(garbage, monkeypatch, tmp_pat
     monkeypatch.setenv(fetch_sessions.MAX_SESSIONS_FOR_SKILL_ENV_VAR, garbage)
 
     assert fetch_sessions.sessions_for_skill("whatever", db_path=str(db)) == []
+
+
+def test_shrink_bytes_rejects_a_float_looking_value(monkeypatch, capsys):
+    """The first byte-valued tunable, so it is read with env_int rather than env_float: a
+    fractional byte is meaningless, and silently truncating "2048.0" to 2048 would hide a
+    misconfiguration rather than surface it."""
+    monkeypatch.setenv("SKILL_EVOLUTION_MAX_SHRINK_BYTES", "2048.0")
+
+    value = evaluate.env_int("SKILL_EVOLUTION_MAX_SHRINK_BYTES",
+                             evaluate.DEFAULT_MAX_SHRINK_BYTES)
+
+    assert value == evaluate.DEFAULT_MAX_SHRINK_BYTES
+    assert "SKILL_EVOLUTION_MAX_SHRINK_BYTES" in capsys.readouterr().err

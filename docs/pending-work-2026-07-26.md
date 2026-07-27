@@ -390,42 +390,190 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 
 ### Smaller open items (11)
 
-- **Optimizer defaults untuned.** `MIN_SESSIONS=3`, `DEFAULT_MAX_METRIC_CALLS=20`,
-  `DEFAULT_MAX_SESSIONS_FOR_SKILL=20` are env-configurable but never tuned against usage.
-  Three real runs exist now to reason from.
-- **The 15KB absolute cap makes three skills un-improvable.** `wiki-harvest` (40KB),
-  `llm-wiki` (23KB), `code-review-and-quality` (20KB) already exceed
-  `SKILL_EVOLUTION_MAX_SKILL_SIZE_KB`, so *any* body proposal for them fails on size
-  regardless of delta. Decide: raise the cap, support partial/section-scoped proposals, or
-  accept that they are manual-only.
-- **Percentage-only size limits are weakest where damage is largest.** 15% of the median
-  9,748B skill is ~1.4KB; 15% of the largest (102KB) is ~15KB. An absolute byte floor
-  alongside the percentages is the natural complement.
+- ~~**Optimizer defaults untuned.**~~ **Partially resolved 2026-07-26.** Of the three,
+  only `DEFAULT_MAX_METRIC_CALLS` had load-bearing evidence in the three real runs:
+  `money-admin-messaging` (`--iterations 4`) took 2+ minutes against `big-pickle`
+  (30s+/metric-call) and already found both a real score gain (0.55→0.633) and the
+  pathological +121.8%-growth failure inside those 4 calls, so the old default of 20 meant
+  a 10+ minute unattended foreground call for what's designed as a manual, non-cron
+  operation. Moved 20 → 8 — 2x the empirically-sufficient count, not a guess.
+  `MIN_SESSIONS=3` and `DEFAULT_MAX_SESSIONS_FOR_SKILL=20` are unchanged: none of the
+  three runs (8, 20, and unspecified-but->3 sessions) tested `MIN_SESSIONS`'s boundary, and
+  both 8- and 20-session trainsets ran fine, so neither constant has evidence pointing
+  anywhere — moving them now would be tuning on vibes, not data. See
+  `docs/pending-work.md` → "Optimizer defaults were unvalidated against real usage" and
+  "Size limits vs. the optimizer: three runs, not one" for the full evidence.
+- ~~**The 15KB absolute cap makes three skills un-improvable.**~~ **RESOLVED 2026-07-26.**
+  **Correcting the record first: the "three skills" figure was a spot-check, never a
+  census.** The real number is **22 of 143** (15% of the tree) — median 9,954B, max
+  103,656B (`research-paper-writing`, which this document elsewhere referenced as ~102KB
+  without noticing it was also over the cap). `wiki-harvest`, `llm-wiki` and
+  `code-review-and-quality` were simply the three someone happened to look at.
+  Of the three options offered, **the cap is now a ratchet**: it fails only when the
+  candidate is over the cap *and* larger than the baseline it replaces. The measured defect
+  was sharper than "un-improvable" — a proposal *shrinking* `code-review-and-quality`
+  toward compliance was rejected with the byte-identical message as one growing it, so the
+  gate could not distinguish improvement from worsening.
+  The other two were rejected on evidence: **raising the cap** weakens the guard for the
+  121 compliant skills and no value covers the tree (25KB still leaves 9 over, 45KB leaves
+  1), and it silently rescales the per-pass absolute growth bound, which is `cap × g/(1+g)`;
+  **section-scoped proposals** need a new proposal field, a body splitter, new
+  `skill_manage` patch semantics and a re-based size model — a much larger change for a
+  problem the ratchet solves.
+  `create_new` keeps the strict cap, so a skill is never born oversized. Honest limitation
+  recorded in `CLAUDE.md`: this makes oversized skills *improvable*, not *downsizable* —
+  at 2048B/pass, walking `research-paper-writing` to compliance would take ~44 approved
+  passes, so a 103KB skill still needs a human to split it.
+- ~~**Percentage-only size limits are weakest where damage is largest.**~~ **RESOLVED
+  2026-07-26**, and the numbers here were stale too: with the shrink floor at 15% (not 20%)
+  and the census above, one pass could delete **15,548B** from the 103,656B skill while
+  reporting a compliant −15.0%. `SKILL_EVOLUTION_MAX_SHRINK_BYTES` (default **2048**, `0`
+  disables) now bounds it, applied as a second sequential check after the percentage so the
+  feedback names whichever limit bound. The default is the crossover, not a preference:
+  `2048/0.15 = 13,653B`, just under the 15,360B cap, so the byte floor is inert for
+  essentially every within-cap skill by construction and operative precisely on the
+  oversized tail. Candidates measured against the real tree — 1024B binds 102/143 (replaces
+  the percentage for most skills), 1536B binds 68 (binds at the median), **2048B binds 35**,
+  3072B binds 12.
+  No growth counterpart: per-pass absolute growth is already bounded at `cap × g/(1+g)` =
+  2,560B within the cap and at 0 for an oversized skill under the ratchet. No *cumulative*
+  byte limit either — any allowance tight enough to matter would structurally re-block what
+  the ratchet just unblocked, and reaching the cumulative percentage requires ~15 separate
+  human approvals, so that risk is amortized across review events while a single pass's is
+  not.
+- **Decision recorded: those two items are causally coupled and must not be separated.**
+  The 15KB single-pass deletion was *masked* before the ratchet — the shrunk candidate was
+  still over the cap and failed there first — so unblocking oversized skills is what made
+  it reachable. **Ratcheting the cap without the byte floor is a net regression in deletion
+  safety.** They shipped together, byte floor first.
+- **Follow-on found while doing it: the ratchet made the cap depend on model-authored
+  input.** `old_value` is written by the analyzer LLM (`session-analyzer-prompt.md` asks it
+  to emit the current value) and persisted verbatim, so once the cap asks "is this larger
+  than what it replaces?", an inflated `old_value` raises the ceiling it is checked
+  against — a proposal claiming a 951KB baseline could ship a 950KB body past a 15KB cap
+  with every percentage check reporting a rounding-error delta. Not mainly adversarial: a
+  duplicated or truncated transcription is an ordinary LLM failure, and `--retroactive`
+  re-scores proposals whose `old_value` may no longer describe anything on disk. Fixed in
+  the same change — `evaluate_skill_text()` now resolves the baseline from the installed
+  `SKILL.md` (body changes only, best-effort, shared with `evaluate_and_record()` so history
+  records the size that was judged), mirroring the distrust
+  `optimize_skill._resolve_baseline_size_bytes()` already applied at draft time.
 - **`create_new` proposals can never regress.** Empty `target_skill` → target key falls
   back to `proposal:<uuid>`, so each gets a single-entry lineage and `RegressionEvaluator`
   always reports "no baseline yet". Regression coverage is effectively
   `improve_existing`-only.
-- **`prune_history()` deletes only.** Eval plan R22 says entries "may be archived or
-  compacted"; only deletion exists, and it is CLI-invoked (`--prune`) — never called
-  automatically, so unattended runs grow the file indefinitely.
-- **`processed_sessions` grows unbounded.** No pruning of the state file either.
-- **`STATE_FILE` is not configurable.** A module constant with no env override, so running
-  against isolated state requires monkeypatching. Note that once dedup works,
-  `fetch_sessions.py --dry-run` legitimately returns 0 sessions — correct, but it looks
-  like a failure.
+- ~~**`prune_history()` deletes only.**~~ **RESOLVED 2026-07-26** — full design in
+  [`2026-07-26-001-fix-history-and-state-pruning-plan.md`](plans/2026-07-26-001-fix-history-and-state-pruning-plan.md).
+  Pruned entries are now **archived**, not discarded — appended to a sibling file
+  (`get_history_archive_path()`, default `eval_history.archive.jsonl`, overridable via
+  `SKILL_EVOLUTION_HISTORY_ARCHIVE_PATH`) *before* the primary file is rewritten, so a
+  crash mid-prune loses nothing. Chosen over compaction (R22's other permitted option)
+  because archiving already satisfies R22's actual goal — a bounded primary file — without
+  a lossy "compacted summary" record needing to independently satisfy three different
+  readers (`original_size_for_target()`, `RegressionEvaluator`, `optimize_skill`'s
+  `find_low_scoring_targets()`).
+  **Pruning also now runs automatically**, via `evaluate_and_record(auto_prune=True)`
+  (the default), not just `--prune` — `apply_proposal()` gets this for free with no code
+  change, since it already calls `evaluate_and_record(proposal)` with no extra kwargs.
+  `retroactive_reevaluate()` prunes once after its whole batch instead of once per
+  proposal, since `prune_history()` rewrites the shared history file (every target), not
+  just the one being re-evaluated.
+  **Designing this surfaced a real correctness hole in the pre-existing "always keep the
+  most recent entry" rule**: it protects `optimize_skill.find_low_scoring_targets()`, but
+  `RegressionEvaluator` baselines against the last entry that actually *passed* — pruning
+  a passing baseline while newer failing retries survived would have silently disabled
+  regression coverage for exactly the targets that most need it. A second, matching hole:
+  `original_size_for_target()` reads the *earliest* entry as its cumulative-drift baseline,
+  so trimming a target's oldest entries would have silently shifted that baseline forward,
+  forgiving prior drift. Both closed by extending the always-kept rule from one entry to
+  **up to three anchors** (most recent, most recent passing, earliest — deduplicated when
+  they coincide) rather than adding an archive-read fallback to two separate functions.
+  The retained count per target can now exceed the configured retention by up to two
+  entries; that's the intended, stronger guarantee, not a bug — several existing tests that
+  pinned the old exact-count behavior were updated accordingly, with docstrings explaining
+  why the numbers changed.
+- ~~**`processed_sessions` grows unbounded.**~~ **RESOLVED for the shape that's actually
+  growing, 2026-07-26** — same plan doc as above. New `SKILL_EVOLUTION_STATE_RETENTION`
+  (same bare-int/`"Nd"`/`"Nmo"` syntax as the history retention var) drives
+  `prune_processed()`, duplicated in both `state.py` and `fetch_sessions.py` per the
+  existing convention. **Deliberately scoped to the flat `{id: timestamp}` shape only** —
+  the deployed, actually-growing production shape. The documented
+  `{"processed_sessions": [...]}` shape carries no per-session timestamp, and (a finding
+  from designing this) its list order isn't chronological either:
+  `fetch_sessions()` builds it from a Python `set` union, whose iteration order is
+  hash-based, not insertion-based. So there is no temporal signal to prune by there without
+  a schema change, which this deliberately does not attempt — configuring retention against
+  a documented-shape file is a no-op with a stderr warning on every call, not a silent gap.
+  **A structurally-required safeguard, not just a cautious one:** `mark_processed()` stamps
+  every session in a batch with the identical `now()` value, so "keep the N most recent"
+  has no tiebreak among a single run's own writes — without a `keep_ids` floor, a tight
+  retention count could prune most of the very batch a run just wrote, undoing its own
+  dedup. `fetch_sessions()` (the only real orchestrator) computes the genuinely-new-this-run
+  IDs and passes them as `keep_ids`, closing that hole completely.
+  **One hole remains, documented rather than fixed:** `keep_ids` protects a run's own
+  writes from itself, not across separate runs — if retention is configured tighter than a
+  later run's `--lookback-hours`, a pruned session can still fall inside that run's query
+  window and get re-fetched, re-marked, and re-analyzed indefinitely. `fetch_sessions()`
+  now warns on stderr every run where this is misconfigured (age-based retention only —
+  count-based has no clean unit match to `--lookback-hours`), but does not couple the two,
+  which would be a larger, more opinionated change. Manual escape hatch:
+  `fetch_sessions.py --prune-state`, reporting to stderr (not stdout, which is the NDJSON
+  channel other tooling parses).
+- ~~**`STATE_FILE` is not configurable.**~~ **RESOLVED 2026-07-26.**
+  `SKILL_EVOLUTION_STATE_FILE` overrides it, resolved at call time via `get_state_file()`
+  in **both** `fetch_sessions.py` and `state.py` (duplicated on purpose, with
+  `tests/test_state_schema_compat.py` catching drift). The fallback is the module global,
+  not the literal path, so the existing monkeypatch-`STATE_FILE` approach several tests use
+  keeps working. A blank/whitespace value is ignored rather than redirecting state to `""`.
+  Still true and still worth knowing: once dedup works, `fetch_sessions.py --dry-run`
+  legitimately returns 0 sessions — correct, but it looks like a failure.
 - **R9's runner-up narrative is score-only.** The plan asks the rationale to report *what
   trade-off* the runner-up made; the code reports its score and margin, not a qualitative
   description.
-- **`sessions_for_skill()` does not degrade on a missing/empty DB** — it raises
-  `sqlite3.OperationalError` because sqlite creates the file and the query then finds no
-  tables. Only reachable via the optimizer path, so low impact, but it is an unhandled
-  crash rather than an empty result.
-- **An invalid proposal status silently drops the file from inventory** —
-  `list_proposals()` swallows `load_proposal()`'s `ValueError`, so a model-authored
-  status like `already_covered` makes a proposal vanish from `--list` and
-  `--retroactive` with no warning. Seen for real in the ai-memory-stack proposals.
-- **The User-Agent fix is unverified against Claude and Ollama.** It changed shared
-  `_post_json()` behavior and was only exercised against OpenCode Zen.
+- ~~**`sessions_for_skill()` does not degrade on a missing/empty DB**~~ — **RESOLVED
+  2026-07-26.** `_session_db_is_readable()` checks existence and the `sessions` table
+  *before* `sqlite3.connect()`, returning `[]` with a stderr warning. Checking first also
+  fixes a side effect the original note didn't mention: `connect()` **created** a stray
+  0-byte file at the bad path, so a typo'd `--db-path` both crashed confusingly and
+  littered. Deliberate asymmetry: **`fetch_sessions()` still raises**, because it is the
+  unattended cron path where an unreadable DB is a failure the operator needs surfaced, not
+  a run that quietly reports zero sessions nightly. The optimizer is interactive and "no
+  history for this skill" is a normal outcome there, so degrading is right. A valid DB with
+  zero matching sessions warns about nothing.
+- ~~**An invalid proposal status silently drops the file from inventory**~~ — **RESOLVED
+  2026-07-26.** `list_proposals()` still skips a file it cannot parse (one malformed
+  proposal must not take down the listing) but now names it and the reason on stderr.
+  Of the two options the original note offered, this is "surface the skipped file" rather
+  than "accept unknown statuses as opaque": keeping the parse strict means `ProposalStatus`
+  still constrains the schema, while the loss stops being invisible. That matters more here
+  than elsewhere because a proposal is a unit of work awaiting a *human decision* — a file
+  that errors gets looked at, a file that vanishes does not. Applies to any model-authored
+  field, not just `status`, since the analyzer writes these files.
+- ~~**The User-Agent fix is unverified against Claude and Ollama.**~~ **Ollama half
+  RESOLVED 2026-07-26** (Claude still open — no `ANTHROPIC_API_KEY` in this environment to
+  verify against). Verified end to end against a real local Ollama server
+  (`ollama==0.30.10`, models `qwen3.5` and `gemma4`), not just `curl`:
+  - **Ollama's endpoint does not gate on User-Agent at all** — both the pre-fix default
+    (`Python-urllib/3.12`) and the real `hermes-skill-evolution/0.1` header returned 200.
+    So this specific failure mode was never a live risk for Ollama; the fix is confirmed
+    harmless there rather than confirmed necessary.
+  - `_call_ollama()` → `_post_json()`, the real code path with the real header, returned a
+    correct completion against a live server.
+  - The full public `LLMJudgeEvaluator.evaluate()` scored a real installed skill
+    (`systematic-debugging`, 15,325B) via `gemma4` at **0.98** (parsed cleanly despite the
+    model wrapping its JSON in a ` ```json ` fence, which `_parse_response()`'s `{.*}` scan
+    handles). The full gate (`deterministic` + `llm_judge` via `run_evaluators()`/
+    `combine_gate()`) ran end to end and correctly reported **FAILED** — `deterministic`
+    legitimately rejected on the absolute cap (this skill is 15,383B, one of the 22 over
+    15KB, and the ad hoc context supplied no `baseline_size` so the strict cap applied)
+    while `llm_judge` passed, which is the gate discriminating rather than rubber-stamping.
+  - **New finding, not previously known:** the response took **54–56s of the 60s default
+    `call_provider` timeout** — `qwen3.5` (a heavier reasoning model) timed out outright on
+    the same prompt. Local reasoning-capable models burn a large fraction of their output on
+    chain-of-thought before the JSON, so the 60s default is tight for the Ollama provider
+    specifically, in a way it plausibly isn't for a hosted API. Not fixed here — no timeout
+    override is exposed per-provider yet — but worth a `SKILL_EVOLUTION_OLLAMA_TIMEOUT`-style
+    knob if local-model latency becomes a recurring friction point.
 
 ---
 

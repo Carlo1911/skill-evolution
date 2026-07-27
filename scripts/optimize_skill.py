@@ -28,8 +28,30 @@ DEFAULT_LOW_SCORE_THRESHOLD = 0.6
 GEPA_EVALUATOR_NAME = "gepa_evaluator"
 
 # ── Core GEPA optimization run (U3) ─────────────────────────────────────
+# Tuned 2026-07-26 against the three real Fase 0 runs (docs/pending-work.md,
+# "Size limits vs. the optimizer: three runs, not one"). Only
+# DEFAULT_MAX_METRIC_CALLS moved -- it's the only one of the three optimizer
+# constants those runs produced load-bearing evidence for:
+#   - money-admin-messaging (8 sessions, explicit --iterations 4) already
+#     found a real score gain (0.55 -> 0.633) *and* the pathological +121.8%
+#     growth failure inside 4 calls, and took over two minutes wall-clock on
+#     OpenCode Zen's big-pickle -- i.e. 30s+/metric-call. At the old default
+#     of 20 that's a 10+ minute unattended foreground call for what CLAUDE.md
+#     documents as a manual, occasional, human-invoked operation (never
+#     cron-triggered). 8 keeps headroom (2x what was empirically sufficient
+#     for real movement) while bounding the worst case to roughly what one
+#     run already proved out, instead of doubling it on no further evidence.
+#   - hermes-agent and test-driven-development's runs didn't record their
+#     iteration counts, so they say nothing about whether *more* calls than 4
+#     help large skills converge further -- that remains open.
+# MIN_SESSIONS was never exercised near its boundary (the three runs used
+# skills with 8, 20, and >=3 sessions respectively) and
+# DEFAULT_MAX_SESSIONS_FOR_SKILL was never shown to bind badly (8 and 20
+# sessions both produced a working run) -- both stay at their original
+# judgment-call values rather than move on evidence that doesn't cover them.
+# An explicit --iterations always overrides this default regardless.
 MIN_SESSIONS = 3
-DEFAULT_MAX_METRIC_CALLS = 20
+DEFAULT_MAX_METRIC_CALLS = 8
 
 # ── U4: env-var overrides for the above, following evaluate.py's
 # SKILL_EVOLUTION_<NOUN> convention (an OPTIMIZER_ segment distinguishes
@@ -334,6 +356,9 @@ def _build_objective(seed_body: str, skill_name: str) -> str:
     """
     import evaluate
 
+    # `base` is measured from the installed SKILL.md, not from any proposal, so unlike the
+    # gate's baseline it needs no distrust handling -- this is the one place the window is
+    # computed entirely from disk.
     base = len(seed_body.encode("utf-8"))
     max_growth = evaluate.env_float(evaluate.MAX_GROWTH_PCT_ENV_VAR, evaluate.DEFAULT_MAX_GROWTH_PCT)
     max_shrink = evaluate.env_float(evaluate.MAX_SHRINK_PCT_ENV_VAR, evaluate.DEFAULT_MAX_SHRINK_PCT)
@@ -354,8 +379,42 @@ def _build_objective(seed_body: str, skill_name: str) -> str:
         "deleting guidance to save space is not an improvement."
     )
 
+    # All four constraints are computed and intersected before any branching. An earlier
+    # version returned early from inside the cumulative block, which meant a window emptied
+    # by a *different* constraint was never detected. Notes are collected in precedence
+    # order -- ratchet, then cumulative, then byte floor -- so the most surprising reason a
+    # window is narrow is the one the model is told about first.
+    notes: List[str] = []
+
+    # (2) Absolute per-pass deletion floor. Without the note, an oversized skill gets a
+    # ~2KB-wide window on a 100KB body with no explanation, which reads as a bug.
+    max_shrink_bytes = evaluate.env_int(evaluate.MAX_SHRINK_BYTES_ENV_VAR,
+                                        evaluate.DEFAULT_MAX_SHRINK_BYTES)
+    byte_floor_note = ""
+    if max_shrink_bytes > 0 and base - max_shrink_bytes > lower:
+        lower = base - max_shrink_bytes
+        byte_floor_note = (
+            f" At most {max_shrink_bytes} bytes may be removed in a single pass, which is "
+            f"what sets the lower bound."
+        )
+
+    # (3) Absolute cap, applied as the ratchet the gate applies: a skill already over the
+    # cap may not grow at all, and one under it may not cross it.
+    cap_bytes = int(evaluate.env_float(evaluate.MAX_SKILL_SIZE_KB_ENV_VAR,
+                                       evaluate.DEFAULT_MAX_SKILL_SIZE_KB) * 1024)
+    oversized = base > cap_bytes
+    if oversized:
+        upper = min(upper, base)
+    else:
+        if cap_bytes < upper:
+            notes.append(
+                f" The {cap_bytes}-byte absolute limit for a skill, not the growth "
+                f"percentage, is what caps this."
+            )
+        upper = min(upper, cap_bytes)
+
+    # (4) Cumulative drift, against where the target started.
     original = evaluate.original_size_for_target(f"skill:{skill_name}")
-    cumulative_note = ""
     if original:
         cum_growth = evaluate.env_float(evaluate.MAX_CUMULATIVE_GROWTH_PCT_ENV_VAR,
                                         evaluate.DEFAULT_MAX_CUMULATIVE_GROWTH_PCT)
@@ -365,31 +424,60 @@ def _build_objective(seed_body: str, skill_name: str) -> str:
         cum_upper = int(original * (1 + cum_growth / 100))
 
         if cum_lower > lower or cum_upper < upper:
-            cumulative_note = (
+            notes.append(
                 f" This skill started at {original} bytes and total drift is capped "
                 f"separately, which is what narrows the range above."
             )
         lower, upper = max(lower, cum_lower), min(upper, cum_upper)
 
-        if lower > upper:
-            # An empty window: telling the model to land "between X and Y" with X > Y is
-            # worse than saying nothing, so name the situation instead.
+    if byte_floor_note:
+        notes.append(byte_floor_note)
+
+    if lower > upper:
+        # An empty window: telling the model to land "between X and Y" with X > Y is worse
+        # than saying nothing, so name the situation instead. Which advice is correct
+        # depends on *which side* is violated -- the previous single message assumed the
+        # growth side and was silently wrong for the other.
+        if base < lower:
+            # Already below the floor: a same-length rewrite fails the shrink check too, so
+            # advising one would send the model after a candidate that cannot be accepted.
             return (
                 task
                 + f"SIZE CONSTRAINT: there is no admissible size for a revision of this "
-                f"skill. It is {base} bytes and already beyond the cumulative drift "
-                f"allowance measured from its original {original} bytes, so any body "
-                f"change will be rejected on size alone. Improve wording and structure "
-                f"strictly within the current length -- do not add or remove material."
+                f"skill. At {base} bytes it is already past the allowance measured from "
+                f"its original {original} bytes, and no revision of any length will pass "
+                f"the size gate. This target needs human attention rather than automated "
+                f"optimization; do not attempt to reach an admissible size."
                 + preserve
             )
+        return (
+            task
+            + f"SIZE CONSTRAINT: there is no admissible size for a revision of this "
+            f"skill. It is {base} bytes and already beyond the drift allowance measured "
+            f"from its original {original} bytes, so any body change that alters its "
+            f"length will be rejected on size alone. Improve wording and structure "
+            f"strictly within the current length -- do not add or remove material."
+            + preserve
+        )
+
+    if oversized:
+        return (
+            task
+            + f"SIZE CONSTRAINT: the current body is {base} bytes, already over the "
+            f"{cap_bytes}-byte absolute limit for a skill. A revision is admissible only "
+            f"if it is no larger than the current body -- this skill cannot be made "
+            f"bigger, however good the addition. Your revision must be between {lower} "
+            f"and {upper} bytes. A revision outside that range is rejected outright."
+            + "".join(notes)
+            + preserve
+        )
 
     return (
         task
         + f"HARD SIZE BUDGET: the current body is {base} bytes. Your revision must be "
         f"between {lower} and {upper} bytes. "
         f"A revision outside that range is rejected outright, however good it is."
-        + cumulative_note
+        + "".join(notes)
         + preserve
     )
 
@@ -490,6 +578,13 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     baseline_size = _resolve_baseline_size_bytes(skill_name)
     if baseline_size is not None:
         structural_context["baseline_size"] = baseline_size
+    # Cumulative drift, the same reference _build_objective() already consults. Without it
+    # the objective would constrain the search against three limits while the draft-time
+    # validator that anticipates the gate checked only two -- the objective stricter than
+    # the check it exists to predict, which is backwards.
+    original_size = evaluate.original_size_for_target(f"skill:{skill_name}")
+    if original_size:
+        structural_context["original_size"] = original_size
 
     check = evaluate.DeterministicEvaluator().evaluate(result.best_candidate, context=structural_context)
     if not check.passed:

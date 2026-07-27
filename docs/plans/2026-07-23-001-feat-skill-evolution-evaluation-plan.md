@@ -19,14 +19,18 @@ execution: code
 > OpenCode Zen), append-only versioned history with retention pruning, redaction at both the
 > provider and on-disk points, fail-closed error handling (R21), and the `.gitignore` fix
 > (R17). Also beyond this plan: a shrink floor, cumulative drift limits, regex-based secret
-> detection, and PII masking.
+> detection, and PII masking. **R22's archive/compaction path shipped 2026-07-26** — archive
+> chosen over compaction (see
+> [`2026-07-26-001-fix-history-and-state-pruning-plan.md`](2026-07-26-001-fix-history-and-state-pruning-plan.md)):
+> `prune_history()` now moves dropped entries to a sibling file instead of deleting them,
+> and runs automatically after every real evaluation (`evaluate_and_record()`), not only
+> via `--prune`.
 >
 > **Not shipped, deliberately:** R3's human-in-the-loop evaluator (no trigger scenario yet),
 > R5's proposal-quality / tool-call-quality / analyzer-prompt-quality targets (so KD2's
 > shared-core generalization claim remains unverified), R7's first-party OpenAI and Gemini
-> branches, R14's multi-round Pareto iteration, R16's cron migration (done differently — see
-> the backlog's P0-1), and R22's archive/compaction path (`prune_history()` deletes only, and
-> is CLI-invoked rather than automatic).
+> branches, R14's multi-round Pareto iteration, and R16's cron migration (done differently —
+> see the backlog's P0-1).
 
 
 # Skill Evolution Evaluation Framework - Plan

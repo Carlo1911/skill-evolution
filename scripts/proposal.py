@@ -177,6 +177,19 @@ def load_proposal(path: str) -> SkillEvolutionProposal:
 
 
 def list_proposals(directory: Optional[str] = None) -> List[SkillEvolutionProposal]:
+    """Load every proposal in `directory`, reporting -- not silently dropping -- the ones
+    that fail to parse.
+
+    A proposal is a unit of work awaiting a human decision, so a file that disappears from
+    the inventory is worse than one that errors: nobody goes looking for it. This swallowed
+    ValueError/IOError entirely, and it fired for real -- a model wrote
+    `status: already_covered`, which is not in ProposalStatus, and load_proposal() raised;
+    `--list` and `--retroactive` then reported 7 of 8 files with no indication the eighth
+    existed. Any model-authored field can do this, since the analyzer writes these files.
+
+    Skips still happen (one malformed file must not take down the listing) but each is now
+    named on stderr with its reason. stderr because stdout carries this module's CLI output.
+    """
     proposals_dir = directory or get_proposals_dir()
     if not os.path.isdir(proposals_dir):
         return []
@@ -186,8 +199,8 @@ def list_proposals(directory: Optional[str] = None) -> List[SkillEvolutionPropos
             continue
         try:
             proposals.append(load_proposal(os.path.join(proposals_dir, fname)))
-        except (ValueError, IOError):
-            continue
+        except (ValueError, IOError) as e:
+            print(f"warning: skipping unreadable proposal {fname}: {e}", file=sys.stderr)
     return proposals
 
 

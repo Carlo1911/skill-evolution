@@ -652,7 +652,12 @@ def test_draft_proposal_from_gepa_result_raises_on_growth_limit(tmp_path, monkey
 
 def test_draft_proposal_from_gepa_result_skips_growth_check_when_skill_unresolvable(monkeypatch):
     """No installed skill matches (e.g. renamed/removed) -- growth check is skipped
-    gracefully, and a structurally valid, non-oversized candidate still succeeds."""
+    gracefully, and a structurally valid, non-oversized candidate still succeeds.
+
+    With no baseline the absolute cap is the *only* size bound left in this branch, and it
+    applies strictly (the ratchet needs a baseline to ratchet against) -- fail-closed, which
+    is the behaviour wanted when the lookup that would have supplied context has failed.
+    """
     monkeypatch.setattr(skill_index, "scan_skills", lambda: [])
     result = _make_gepa_result(
         best_candidate="---\nname: renamed-skill\ndescription: a test skill\n---\n\nSome valid body."
@@ -974,3 +979,66 @@ def test_disabled_optimizer_ignores_skill_and_list_candidates_flags(monkeypatch,
 
     captured = capsys.readouterr()
     assert "disabled" in captured.err.lower()
+
+
+# ── Draft-time size checks after the cap became a ratchet ────────────────
+
+def _install_oversized(tmp_path, monkeypatch, size_bytes, name="big-skill"):
+    """Install a skill whose body exceeds the 15KB absolute cap."""
+    head = f"---\nname: {name}\ndescription: a big skill\n---\n\n"
+    body = head + "x" * (size_bytes - len(head.encode("utf-8")))
+    path = tmp_path / "SKILL.md"
+    path.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": name, "category": "cat", "description": "d",
+         "path": str(path), "size": len(body)}])
+    return body
+
+
+def test_draft_admits_a_non_growing_candidate_for_an_oversized_skill(tmp_path, monkeypatch):
+    """Item 1's headline behaviour, on the path that actually produces these proposals:
+    22 of 143 installed skills exceed the cap, and every body proposal for them used to be
+    rejected on size no matter which direction it moved."""
+    installed = _install_oversized(tmp_path, monkeypatch, 20000)
+    candidate = installed[:-1500]  # -1500B, inside both the % floor and the byte floor
+    result = _make_gepa_result(best_candidate=candidate)
+
+    drafted = optimize_skill.draft_proposal_from_gepa_result("big-skill", result)
+
+    assert drafted.proposed_changes[0].new_value == candidate
+
+
+def test_draft_rejects_a_growing_candidate_for_an_oversized_skill(tmp_path, monkeypatch):
+    """The ratchet is one-directional: over the cap means it may not get bigger."""
+    installed = _install_oversized(tmp_path, monkeypatch, 20000)
+    result = _make_gepa_result(best_candidate=installed + "y" * 500)
+
+    with pytest.raises(ValueError, match="size"):
+        optimize_skill.draft_proposal_from_gepa_result("big-skill", result)
+
+
+def test_draft_passes_original_size_to_the_structural_check(tmp_path, monkeypatch):
+    """Draft time must consult the same three references the objective does, or the
+    objective would constrain the search more tightly than the check anticipating the gate."""
+    history = str(tmp_path / "eval_history.jsonl")
+    monkeypatch.setattr(evaluate, "get_history_path", lambda: history)
+
+    head = "---\nname: my-skill\ndescription: a test skill\n---\n\n"
+    installed = head + "x" * (10000 - len(head.encode("utf-8")))
+    path = tmp_path / "SKILL.md"
+    path.write_text(installed, encoding="utf-8")
+    monkeypatch.setattr(skill_index, "scan_skills", lambda: [
+        {"name": "my-skill", "category": "cat", "description": "d",
+         "path": str(path), "size": len(installed)}])
+
+    # Records the target as having started at 20000B, so the installed 10000B body is
+    # already -50% and a further per-pass-legal cut breaches the cumulative floor.
+    evaluate.append_history(
+        "skill:my-skill",
+        EvalResult(score=0.9, passed=True, feedback="seed", evaluator_name="gate"),
+        content_size=10000, baseline_size=20000)
+
+    result = _make_gepa_result(best_candidate=installed[:-1000])
+
+    with pytest.raises(ValueError, match="cumulative"):
+        optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
