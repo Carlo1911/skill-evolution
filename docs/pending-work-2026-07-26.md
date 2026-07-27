@@ -12,8 +12,9 @@ than restating it, so the two do not drift. (Three divergent copies of
 `fetch_sessions.py` are what caused P0-1 below; duplicating prose is the same failure mode
 in a cheaper form.)
 
-Test baseline: **351 passed** with `gepa` installed, **347 passed + 1 skipped** without
-(was 253/249 when this document was first written; the P0 and P1 items added the rest).
+Test baseline: **450 passed** with `gepa` installed, **446 passed + 1 skipped** without
+(was 253/249 when this document was first written, 351/347 after the P0/P1 items, and
+443/439 before the provider-timeout knob added its 7 on 2026-07-27).
 
 ---
 
@@ -571,9 +572,14 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
     `call_provider` timeout** — `qwen3.5` (a heavier reasoning model) timed out outright on
     the same prompt. Local reasoning-capable models burn a large fraction of their output on
     chain-of-thought before the JSON, so the 60s default is tight for the Ollama provider
-    specifically, in a way it plausibly isn't for a hosted API. Not fixed here — no timeout
-    override is exposed per-provider yet — but worth a `SKILL_EVOLUTION_OLLAMA_TIMEOUT`-style
-    knob if local-model latency becomes a recurring friction point.
+    specifically, in a way it plausibly isn't for a hosted API. **RESOLVED 2026-07-27** —
+    as a *generic* knob rather than the `SKILL_EVOLUTION_OLLAMA_TIMEOUT`-style per-provider
+    one first suggested here (owner decision: the latency is a property of the model, not of
+    one adapter). `SKILL_EVOLUTION_PROVIDER_TIMEOUT` (seconds, default 60) applies to every
+    provider via `call_provider()` → `resolve_provider_timeout()`; an explicit `timeout=`
+    argument still wins, and a malformed value falls back to the default with a stderr
+    warning (same posture as the other numeric env vars). Covered by tests in
+    `tests/test_evaluate_providers.py`.
 
 ---
 

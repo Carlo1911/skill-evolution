@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import pytest
 
 import evaluate
-from evaluate import ProviderError, call_provider, redact_secrets, resolve_provider
+from evaluate import ProviderError, call_provider, redact_secrets, resolve_provider, resolve_provider_timeout
 
 
 @pytest.fixture(autouse=True)
@@ -169,3 +169,76 @@ def test_provider_call_failure_raises_provider_error(monkeypatch):
 
     with pytest.raises(ProviderError, match="simulated timeout"):
         call_provider("hi", provider="claude")
+
+
+# ── Provider timeout knob ────────────────────────────────────────────
+
+
+def test_resolve_provider_timeout_defaults_to_60(monkeypatch):
+    monkeypatch.delenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", raising=False)
+    assert resolve_provider_timeout() == 60
+
+
+def test_resolve_provider_timeout_reads_env(monkeypatch):
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", "120")
+    assert resolve_provider_timeout() == 120
+
+
+def test_resolve_provider_timeout_explicit_arg_wins_over_env(monkeypatch):
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", "120")
+    assert resolve_provider_timeout(45) == 45
+
+
+def test_resolve_provider_timeout_malformed_env_falls_back_with_warning(monkeypatch, capsys):
+    """Same posture as the other numeric env vars (P0-3): degrade, don't crash."""
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", "abc")
+    assert resolve_provider_timeout() == 60
+    assert "SKILL_EVOLUTION_PROVIDER_TIMEOUT" in capsys.readouterr().err
+
+
+def test_call_provider_passes_env_timeout_to_the_caller(monkeypatch):
+    captured = {}
+
+    def fake_caller(prompt, timeout=None):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "claude", fake_caller)
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", "180")
+
+    call_provider("hi", provider="claude")
+    assert captured["timeout"] == 180
+
+
+def test_call_provider_explicit_timeout_beats_env(monkeypatch):
+    captured = {}
+
+    def fake_caller(prompt, timeout=None):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "claude", fake_caller)
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", "180")
+
+    call_provider("hi", provider="claude", timeout=30)
+    assert captured["timeout"] == 30
+
+
+def test_call_provider_timeout_is_generic_across_providers(monkeypatch):
+    """The knob applies to every provider, not just Ollama: the latency it exists for
+    (local reasoning models burning output on chain-of-thought before the JSON) is a
+    property of the model, not of one adapter."""
+    captured = {}
+
+    def fake_caller(prompt, timeout=None):
+        captured.setdefault("timeouts", []).append(timeout)
+        return "ok"
+
+    for name in ("claude", "ollama", "opencode"):
+        monkeypatch.setitem(evaluate.PROVIDER_CALLERS, name, fake_caller)
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", "90")
+
+    for name in ("claude", "ollama", "opencode"):
+        call_provider("hi", provider=name)
+
+    assert captured["timeouts"] == [90, 90, 90]

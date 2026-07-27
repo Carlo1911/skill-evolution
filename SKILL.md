@@ -185,6 +185,7 @@ No pip packages required beyond Python stdlib for the core pipeline. `gepa==0.1.
 | `SKILL_EVOLUTION_MAX_CUMULATIVE_SHRINK_PCT` | `30` | Total shrink vs the original; bounds compounding erosion |
 | `SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD` | `0.7` | Minimum average rubric score to pass |
 | `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude`, `ollama` or `opencode`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER` |
+| `SKILL_EVOLUTION_PROVIDER_TIMEOUT` | `60` | HTTP timeout (seconds) for every provider call — one generic knob, since the latency it exists for is a property of the model, not the adapter. Raise it for local reasoning models, which spend much of their output on chain-of-thought before the JSON |
 | `ANTHROPIC_API_KEY` | — | Required by the `claude` provider |
 | `SKILL_EVOLUTION_CLAUDE_MODEL` | `claude-sonnet-5` | Model used by the Claude provider adapter |
 | `SKILL_EVOLUTION_OLLAMA_BASE_URL` / `_MODEL` | `http://localhost:11434/v1` / `llama3` | Local-model provider adapter config |

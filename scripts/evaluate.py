@@ -461,9 +461,26 @@ PROVIDER_CALLERS = {
     "opencode": _call_opencode,
 }
 
+PROVIDER_TIMEOUT_ENV_VAR = "SKILL_EVOLUTION_PROVIDER_TIMEOUT"
+DEFAULT_PROVIDER_TIMEOUT = 60
+
+
+def resolve_provider_timeout(timeout: Optional[int] = None) -> int:
+    """Resolve the provider HTTP timeout in seconds: explicit arg > env > default.
+
+    One generic knob for every provider rather than per-provider vars: the latency this
+    exists for is a property of the model, not of one adapter -- local reasoning models
+    spend a large share of their output on chain-of-thought before the JSON (a real
+    `gemma4` judge call took 54-56s of the 60s default; `qwen3.5` timed out outright),
+    which a hosted API typically doesn't do.
+    """
+    if timeout is not None:
+        return timeout
+    return env_int(PROVIDER_TIMEOUT_ENV_VAR, DEFAULT_PROVIDER_TIMEOUT)
+
 
 def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: Optional[str] = None,
-                   timeout: int = 60) -> str:
+                   timeout: Optional[int] = None) -> str:
     """Redact secrets from `prompt`, resolve the active provider, and call it.
 
     Raises ProviderError for an unknown provider or any call failure (fail-closed, R21).
@@ -474,7 +491,7 @@ def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: O
             f"Unknown provider '{resolved}'. Available: {', '.join(sorted(PROVIDER_CALLERS))}"
         )
     safe_prompt = redact_secrets(prompt)
-    return PROVIDER_CALLERS[resolved](safe_prompt, timeout=timeout)
+    return PROVIDER_CALLERS[resolved](safe_prompt, timeout=resolve_provider_timeout(timeout))
 
 
 # ── Deterministic evaluator (size/growth/YAML structure) ────────────
