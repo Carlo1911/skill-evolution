@@ -433,12 +433,12 @@ run_gepa_optimization(skill_name, iterations=None):
 
 ## Definition of Done
 
-- [ ] R1, R2, R3, R4 — U1, U2, U3 implemented and tested; not-enough-history (AE1) and session-linkage scenarios confirmed.
-- [ ] R5, R11 — U5's `--skill`/`--iterations` and `--list-candidates` CLI surface confirmed; old auto-scan-all behavior removed.
-- [ ] R6 — U3's configurable call/iteration limit and completion report confirmed (AE2).
-- [ ] R7, R9 — U4's real-candidate proposal body and full-frontier rationale confirmed.
-- [ ] R8 — U4/U7's gate-no-bypass regression coverage (AE3) passes against the new proposal-construction path.
-- [ ] R10 — U6's `pyproject.toml` extra points at `gepa`, not `dspy`; `dspy` extra alias removed.
-- [ ] All Acceptance Examples (AE1-AE3) pass as tests.
-- [ ] No abandoned-attempt code remains from the old auto-scan/placeholder path once U7 lands, including `_require_dspy()` itself once U6's `dspy` extra is removed.
-- [ ] `pytest` passes clean end to end.
+- [x] R1, R2, R3, R4 — U1, U2, U3 implemented and tested; not-enough-history (AE1) and session-linkage scenarios confirmed.
+- [x] R5, R11 — U5's `--skill`/`--iterations` and `--list-candidates` CLI surface confirmed; old auto-scan-all behavior removed.
+- [x] R6 — U3's configurable call/iteration limit and completion report confirmed (AE2).
+- [x] R7, R9 — U4's real-candidate proposal body and full-frontier rationale confirmed.
+- [x] R8 — U4/U7's gate-no-bypass regression coverage (AE3) passes against the new proposal-construction path.
+- [x] R10 — U6's `pyproject.toml` extra points at `gepa`, not `dspy`; `dspy` extra alias removed.
+- [x] All Acceptance Examples (AE1-AE3) pass as tests.
+- [x] No abandoned-attempt code remains from the old auto-scan/placeholder path once U7 lands, including `_require_dspy()` itself once U6's `dspy` extra is removed.
+- [x] `pytest` passes clean end to end.

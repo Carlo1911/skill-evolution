@@ -9,7 +9,7 @@ import pytest
 
 from evaluate import (
     EvalResult, RegressionEvaluator, append_history, get_history_archive_path,
-    prune_history, read_history,
+    migrate_proposal_history, prune_history, read_history,
 )
 
 
@@ -205,3 +205,88 @@ def _read_jsonl(path):
         return []
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+# ── migrate_proposal_history() tests ───────────────────────────────────────
+
+def test_migrate_proposal_history_moves_entries(history_path):
+    """Happy path: entries keyed proposal:<id> are rewritten to skill:<name>."""
+    append_history("proposal:abc-123", _result(score=0.5), path=history_path)
+    append_history("proposal:abc-123", _result(score=0.7), path=history_path)
+    append_history("proposal:other", _result(score=0.3), path=history_path)
+
+    count = migrate_proposal_history("abc-123", "skill:my-skill", path=history_path)
+
+    assert count == 2
+    migrated = read_history("skill:my-skill", path=history_path)
+    assert len(migrated) == 2
+    assert [e["score"] for e in migrated] == [0.5, 0.7]
+    # The other proposal's entry is untouched
+    other = read_history("proposal:other", path=history_path)
+    assert len(other) == 1
+    # The old target is gone
+    old = read_history("proposal:abc-123", path=history_path)
+    assert len(old) == 0
+
+
+def test_migrate_proposal_history_noop_when_no_entries(history_path):
+    """Zero entries to migrate returns 0, writes nothing."""
+    append_history("proposal:other", _result(score=0.3), path=history_path)
+
+    count = migrate_proposal_history("abc-123", "skill:my-skill", path=history_path)
+
+    assert count == 0
+    assert not os.path.exists(get_history_archive_path(history_path))
+
+
+def test_migrate_proposal_history_idempotent(history_path):
+    """Calling twice does not duplicate entries."""
+    append_history("proposal:abc-123", _result(score=0.5), path=history_path)
+
+    count1 = migrate_proposal_history("abc-123", "skill:my-skill", path=history_path)
+    count2 = migrate_proposal_history("abc-123", "skill:my-skill", path=history_path)
+
+    assert count1 == 1
+    assert count2 == 0  # second call finds nothing to migrate
+    entries = read_history("skill:my-skill", path=history_path)
+    assert len(entries) == 1
+
+
+def test_migrate_proposal_history_archives_before_rewrite(history_path):
+    """Original entries are appended to the archive file before the primary is touched."""
+    append_history("proposal:abc-123", _result(score=0.5), path=history_path)
+    append_history("proposal:abc-123", _result(score=0.7), path=history_path)
+
+    migrate_proposal_history("abc-123", "skill:my-skill", path=history_path)
+
+    archived = _read_jsonl(get_history_archive_path(history_path))
+    assert len(archived) == 2
+    assert [e["score"] for e in archived] == [0.5, 0.7]
+    # Archived entries still carry the old target key
+    assert all(e["target"] == "proposal:abc-123" for e in archived)
+
+
+def test_migrate_proposal_history_merges_with_existing_skill_history(history_path):
+    """When skill:<name> already has entries, migrated entries are appended after them."""
+    append_history("proposal:abc-123", _result(score=0.7), path=history_path)
+    append_history("skill:my-skill", _result(score=0.3), path=history_path)
+    append_history("skill:my-skill", _result(score=0.4), path=history_path)
+
+    migrate_proposal_history("abc-123", "skill:my-skill", path=history_path)
+
+    entries = read_history("skill:my-skill", path=history_path)
+    assert len(entries) == 3
+    # Existing entries come first, migrated after
+    assert [e["score"] for e in entries] == [0.3, 0.4, 0.7]
+
+
+def test_migrate_proposal_history_preserves_other_targets(history_path):
+    """Unrelated targets are not affected by the migration."""
+    append_history("proposal:abc-123", _result(score=0.5), path=history_path)
+    append_history("skill:unrelated", _result(score=0.9), path=history_path)
+
+    migrate_proposal_history("abc-123", "skill:my-skill", path=history_path)
+
+    unrelated = read_history("skill:unrelated", path=history_path)
+    assert len(unrelated) == 1
+    assert unrelated[0]["score"] == 0.9

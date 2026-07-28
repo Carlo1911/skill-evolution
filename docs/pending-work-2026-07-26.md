@@ -236,7 +236,7 @@ posture the evaluation plan's R21 asks for argues for it.
 
 ## P1 — Gaps in today's own work
 
-Self-audit. Both are small and both are mine.
+Self-audit. Three items, all resolved.
 
 ### ~~P1-1. `_build_objective()` understates the real constraint~~ — RESOLVED 2026-07-26
 
@@ -282,11 +282,42 @@ optimizer to draft-time-only checking.
 
 </details>
 
+### ~~P1-3. `RegressionEvaluator` cannot regress `create_new` proposals~~ — RESOLVED 2026-07-27
+
+`target_key_for_proposal()` keyed `create_new` proposals as `proposal:<uuid>`, giving each
+its own single-entry lineage — `RegressionEvaluator` auto-passed with "no baseline yet"
+every time, and no prior skill evaluation was ever compared against.  Fixed by:
+
+1. **`target_key_for_proposal()`** now extracts the skill name from `proposed_changes`
+   (`field="name"`) for `create_new` proposals before falling back to `proposal:<uuid>`.
+2. **`migrate_proposal_history(proposal_id, new_target)`** rewrites history entries from
+   `proposal:<id>` to `skill:<name>` after the skill is created — archive-first, idempotent,
+   same safety posture as `prune_history()`.
+3. **`proposal.apply_proposal()`** calls `migrate_proposal_history()` synchronously after
+   the evaluation gate passes and before building `skill_manage` instructions.
+
+Net effect: a `create_new` proposal that creates skill `my-skill` now carries `skill:my-skill`
+as its target key, so `RegressionEvaluator` compares against the last *passing* entry for
+that skill — the same as `improve_existing`.  Multiple `create_new` proposals for the same
+skill accumulate a shared lineage, and a later `improve_existing` proposal on that skill
+compares against all prior evaluations.
+
+<details><summary>Original finding</summary>
+
+#### P1-3. `RegressionEvaluator` cannot regress `create_new` proposals
+
+`target_key_for_proposal()` returns `proposal:<uuid>` for proposals with no
+`target_skill`.  For `create_new` proposals this means each one gets its own single-entry
+history, so `RegressionEvaluator` always says "no baseline yet" and auto-passes.  The
+regression check is effectively `improve_existing`-only.
+
+</details>
+
 ---
 
 ## ~~P2 — Documentation debt~~ — RESOLVED 2026-07-26
 
-All five closed. One turned out to be more than documentation debt:
+All six closed. One turned out to be more than documentation debt:
 
 **A guardrail was documented that does not exist.** `SKILL.md` claimed, twice (under
 "Constraints & Guardrails" and again under "Safety"), that the pipeline only modifies
@@ -347,7 +378,7 @@ have `gepa` if the extra was installed into a venv.
 `README.md:13` → `<your-user>`, `SKILL.md:50` → `<your-org>`. The repo also has **no git
 remote configured at all**, so Fase 4's "SKILL.md publicado en GitHub" has not happened.
 
-### P2-3. 12 of 23 env vars are undocumented in `SKILL.md`
+### ~~P2-3. 12 of 23 env vars are undocumented in `SKILL.md`~~ — RESOLVED 2026-07-27
 
 `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY`, `SKILL_EVOLUTION_MAX_SHRINK_PCT`,
 `MAX_CUMULATIVE_GROWTH_PCT`, `MAX_CUMULATIVE_SHRINK_PCT`, `OLLAMA_MODEL`,
@@ -355,10 +386,20 @@ remote configured at all**, so Fase 4's "SKILL.md publicado en GitHub" has not h
 `OPTIMIZER_MAX_SESSIONS_FOR_SKILL`, `OPTIMIZER_MIN_SESSIONS`, `PROPOSALS_DIR`.
 `SKILL.md` also documents none of the shrink/cumulative guards or the OpenCode provider.
 
-### P2-4. Every plan's Definition of Done is unchecked
+<details><summary>Original finding</summary>
 
-All 12 checkboxes in the evaluation plan, all 9 in the GEPA plan, and all 4 units in the
-hardening plan are `[ ]` despite the corresponding code being shipped and tested.
+`ANTHROPIC_API_KEY`, `OPENCODE_API_KEY`, `SKILL_EVOLUTION_MAX_SHRINK_PCT`,
+`MAX_CUMULATIVE_GROWTH_PCT`, `MAX_CUMULATIVE_SHRINK_PCT`, `OLLAMA_MODEL`,
+`OPENCODE_BASE_URL`, `OPENCODE_MODEL`, `OPTIMIZER_MAX_METRIC_CALLS`,
+`OPTIMIZER_MAX_SESSIONS_FOR_SKILL`, `OPTIMIZER_MIN_SESSIONS`, `PROPOSALS_DIR`.
+`SKILL.md` also documents none of the shrink/cumulative guards or the OpenCode provider.
+
+</details>
+
+### ~~P2-4. Every plan's Definition of Done is unchecked~~ — RESOLVED 2026-07-27
+
+All 12 checkboxes in the evaluation plan, all 9 in the GEPA plan, and all 7 in the
+hardening plan are now `[x]` — the code was shipped and tested, just never marked.
 `integration-plan.md` Fase 3 is likewise unchecked although `optimize_skill.py` exists and
 now runs for real (under `gepa`, not the `dspy` the doc assumed). Anyone reading these
 docs concludes far less is built than actually is.
@@ -603,8 +644,9 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 3. ~~**P0-2** — decide on PII.~~ **Done 2026-07-26**: identifiers masked, amounts kept,
    sign-off recorded.
 4. ~~**P1-1, P1-2** — close today's own two gaps.~~ **Done 2026-07-26.**
-5. ~~**P2-1..P2-5** — documentation, batched.~~ **Done 2026-07-26.**
-6. Then choose between **item 7** (multi-agent, highest owner interest) and **item 1**
+5. ~~**P1-3** — create_new regression support.~~ **Done 2026-07-27**: `target_key_for_proposal()` fallback, `migrate_proposal_history()`, synchronous integration in `apply_proposal()`.
+6. ~~**P2-1..P2-5** — documentation, batched.~~ **Done 2026-07-26** (P2-3, P2-4 closed 2026-07-27).
+7. Then choose between **item 8** (multi-agent, highest owner interest) and **item 2**
    (evaluation coverage, unblocks the shared-core claim).
 
-Items 3, 4, and 6 have no trigger yet; leaving them is the right call.
+Items 3, 4, and 7 have no trigger yet; leaving them is the right call.

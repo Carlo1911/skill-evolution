@@ -9,6 +9,7 @@ import pytest
 
 import evaluate
 from evaluate import EvalResult, evaluate_skill_text, target_key_for_proposal
+from proposal import ProposalType
 
 # Captured before the autouse stub below replaces it, so the integration test at the
 # bottom of this file can run the real evaluator chain.
@@ -23,12 +24,14 @@ class _FakeChange:
 
 
 class _FakeProposal:
-    def __init__(self, proposal_id="p1", target_skill=None, summary="", rationale="", proposed_changes=None):
+    def __init__(self, proposal_id="p1", target_skill=None, summary="", rationale="",
+                 proposed_changes=None, type=ProposalType.IMPROVE_EXISTING):
         self.proposal_id = proposal_id
         self.target_skill = target_skill
         self.summary = summary
         self.rationale = rationale
         self.proposed_changes = proposed_changes or []
+        self.type = type
 
 
 @pytest.fixture(autouse=True)
@@ -145,4 +148,41 @@ def test_target_key_uses_skill_prefix_when_target_skill_present():
 
 def test_target_key_falls_back_to_proposal_id_when_no_target_skill():
     proposal = _FakeProposal(proposal_id="abc-123", target_skill=None)
+    assert target_key_for_proposal(proposal) == "proposal:abc-123"
+
+
+def test_target_key_create_new_extracts_name_from_changes():
+    """create_new proposal with field='name' in proposed_changes returns skill:<name>."""
+    proposal = _FakeProposal(
+        proposal_id="abc-123",
+        target_skill=None,
+        type=ProposalType.CREATE_NEW,
+        proposed_changes=[
+            _FakeChange(field="name", new_value="my-new-skill"),
+            _FakeChange(field="description", new_value="A new skill."),
+        ],
+    )
+    assert target_key_for_proposal(proposal) == "skill:my-new-skill"
+
+
+def test_target_key_create_new_no_name_field_falls_back():
+    """create_new proposal without a name change falls back to proposal:<uuid>."""
+    proposal = _FakeProposal(
+        proposal_id="abc-123",
+        target_skill=None,
+        type=ProposalType.CREATE_NEW,
+        proposed_changes=[
+            _FakeChange(field="description", new_value="A new skill."),
+        ],
+    )
+    assert target_key_for_proposal(proposal) == "proposal:abc-123"
+
+
+def test_target_key_non_create_new_no_target_skill():
+    """Non-create_new proposal with no target_skill stays proposal:<uuid>."""
+    proposal = _FakeProposal(
+        proposal_id="abc-123",
+        target_skill=None,
+        type=ProposalType.IMPROVE_EXISTING,
+    )
     assert target_key_for_proposal(proposal) == "proposal:abc-123"

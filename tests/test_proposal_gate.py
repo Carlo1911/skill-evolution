@@ -163,3 +163,37 @@ def test_gate_level_error_blocks_apply_instead_of_crashing(monkeypatch, isolated
     assert result["can_apply"] is False
     assert proposal.status == ProposalStatus.PROPOSED
     assert "evaluation_error" in result
+
+
+def test_apply_proposal_create_new_migrates_history(monkeypatch, isolated_history):
+    """After a create_new proposal passes the gate, history is under skill:<name>,
+    not proposal:<uuid>. Covers the end-to-end migration wiring."""
+    _stub_evaluators(monkeypatch, deterministic_passes=True, llm_judge_passes=True)
+
+    proposal = SkillEvolutionProposal(
+        proposal_id="create-001",
+        type=ProposalType.CREATE_NEW,
+        target_skill=None,
+        confidence=0.9,
+        summary="Create my-new-skill",
+        rationale="Fixture rationale.",
+        proposed_changes=[
+            ProposedChange(field="name", new_value="my-new-skill"),
+            ProposedChange(field="description", new_value="A brand new skill."),
+            ProposedChange(field="category", new_value="general-skills"),
+        ],
+    )
+
+    result = apply_proposal(proposal, min_confidence=0.5)
+
+    assert result["can_apply"] is True
+    assert proposal.status == ProposalStatus.APPLIED
+
+    # History should be keyed under skill:my-new-skill, not proposal:create-001
+    skill_entries = evaluate.read_history("skill:my-new-skill")
+    assert len(skill_entries) == 1
+    assert skill_entries[0]["evaluator_name"] == "gate"
+
+    # The old proposal:<id> target should be empty
+    old_entries = evaluate.read_history("proposal:create-001")
+    assert len(old_entries) == 0

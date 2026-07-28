@@ -249,10 +249,10 @@ The optimizer's `MIN_SESSIONS`, `DEFAULT_MAX_METRIC_CALLS`, and `DEFAULT_MAX_SES
 
 ## Definition of Done
 
-- [ ] R1, R2 — U1 implemented and tested; `fetch_sessions()` runs against a schema-correct fixture and (recommended) the real `state.db` without raising.
-- [ ] R3 — U2's anti-quote instruction confirmed present in the GEPA judge prompt; existing framing regressions still pass.
-- [ ] R4 — U3's pre-draft structural check confirmed on all four failure paths (missing frontmatter, missing required field, size limit, growth limit) plus the resolvable/unresolvable-baseline paths.
-- [ ] R5, R6 — U4's three env var overrides confirmed with unset (regression) and set (override + precedence) coverage; no numeric default value changed.
-- [ ] All Acceptance Examples (AE1-AE3) pass as tests.
-- [ ] No abandoned-attempt code remains (e.g. leftover plain-prose candidate fixtures in `tests/test_optimize_skill.py` once U3's frontmatter-shaped fixtures replace them).
-- [ ] `pytest` passes clean end to end.
+- [x] R1, R2 — U1 implemented and tested; `fetch_sessions()` runs against a schema-correct fixture and (recommended) the real `state.db` without raising.
+- [x] R3 — U2's anti-quote instruction confirmed present in the GEPA judge prompt; existing framing regressions still pass.
+- [x] R4 — U3's pre-draft structural check confirmed on all four failure paths (missing frontmatter, missing required field, size limit, growth limit) plus the resolvable/unresolvable-baseline paths.
+- [x] R5, R6 — U4's three env var overrides confirmed with unset (regression) and set (override + precedence) coverage; no numeric default value changed.
+- [x] All Acceptance Examples (AE1-AE3) pass as tests.
+- [x] No abandoned-attempt code remains (e.g. leftover plain-prose candidate fixtures in `tests/test_optimize_skill.py` once U3's frontmatter-shaped fixtures replace them).
+- [x] `pytest` passes clean end to end.

@@ -573,14 +573,14 @@ Each evaluator (U4-U6) implements the same `Evaluator` interface (U1) and return
 
 ## Definition of Done
 
-- [ ] R1, R2, R3 (v1 set), R4, R10 — U1, U4, U5, U6, U7 implemented and tested; strict-AND gate confirmed via AE1.
-- [ ] R5, R6 — U8 wires skill-text evaluation end-to-end; module structure supports the deferred fast-follow targets without modification.
-- [ ] R7, R8, R9 — U3 implemented for Claude + Ollama/llama.cpp; AE2's per-evaluator override confirmed.
-- [ ] R11, R22 — U2's history store append-and-retain behavior confirmed; retention never drops a target's most recent entry.
-- [ ] R12, R13 — U9's retroactive mode confirmed via AE3 (append, not overwrite).
-- [ ] R14, R15 — U11's optional optimizer confirmed via AE4 (no gate bypass); pipeline unaffected when disabled.
-- [ ] R16 — No changes made to `ai-memory-stack` or the live `~/.hermes/cron/jobs.json`; production migration remains explicitly deferred.
-- [ ] R17, R19 — U10's `.gitignore` anchoring and redaction-on-write confirmed.
-- [ ] R18, R20, R21 — U3's pre-send redaction, U5's untrusted-content framing, and U7's fail-closed error handling confirmed.
-- [ ] All Acceptance Examples (AE1-AE4) pass as integration tests.
-- [ ] `Outstanding Questions` in the Product Contract are resolved by this Planning Contract (KTD1-KTD6) or remain correctly scoped to future work.
+- [x] R1, R2, R3 (v1 set), R4, R10 — U1, U4, U5, U6, U7 implemented and tested; strict-AND gate confirmed via AE1.
+- [x] R5, R6 — U8 wires skill-text evaluation end-to-end; module structure supports the deferred fast-follow targets without modification.
+- [x] R7, R8, R9 — U3 implemented for Claude + Ollama/llama.cpp; AE2's per-evaluator override confirmed.
+- [x] R11, R22 — U2's history store append-and-retain behavior confirmed; retention never drops a target's most recent entry.
+- [x] R12, R13 — U9's retroactive mode confirmed via AE3 (append, not overwrite).
+- [x] R14, R15 — U11's optional optimizer confirmed via AE4 (no gate bypass); pipeline unaffected when disabled.
+- [x] R16 — No changes made to `ai-memory-stack` or the live `~/.hermes/cron/jobs.json`; production migration remains explicitly deferred.
+- [x] R17, R19 — U10's `.gitignore` anchoring and redaction-on-write confirmed.
+- [x] R18, R20, R21 — U3's pre-send redaction, U5's untrusted-content framing, and U7's fail-closed error handling confirmed.
+- [x] All Acceptance Examples (AE1-AE4) pass as integration tests.
+- [x] `Outstanding Questions` in the Product Contract are resolved by this Planning Contract (KTD1-KTD6) or remain correctly scoped to future work.

@@ -314,6 +314,59 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
             f.write(json.dumps(entry) + "\n")
 
 
+def migrate_proposal_history(proposal_id: str, new_target: str,
+                              path: Optional[str] = None,
+                              archive_path: Optional[str] = None) -> int:
+    """Migrate history entries from ``proposal:<id>`` to ``new_target`` (e.g. ``skill:<name>``).
+
+    Called after a ``create_new`` proposal is applied and the skill now exists under its
+    real name.  Returns the number of entries migrated (0 if none found or already
+    migrated -- idempotent).
+
+    Safety mirrors ``prune_history()``: archive originals *before* rewriting the primary
+    so a crash mid-migration loses nothing.  When ``new_target`` already has entries
+    (e.g. the skill was previously created and evaluated), migrated entries are appended
+    after the existing ones to preserve chronological ordering within each lineage.
+    """
+    history_path = path or get_history_path()
+    entries = _read_all_entries(history_path)
+    if not entries:
+        return 0
+
+    old_target = f"proposal:{proposal_id}"
+    to_migrate = [e for e in entries if e.get("target") == old_target]
+    if not to_migrate:
+        return 0
+
+    # Build rewritten entries (same data, new target key)
+    migrated = [{**e, "target": new_target} for e in to_migrate]
+
+    # Archive the originals before touching the primary
+    archive_file = archive_path or get_history_archive_path(history_path)
+    archive_dir = os.path.dirname(archive_file)
+    if archive_dir:
+        os.makedirs(archive_dir, exist_ok=True)
+    with open(archive_file, "a") as f:
+        for entry in to_migrate:
+            f.write(json.dumps(entry) + "\n")
+
+    # Rebuild primary: everything that wasn't migrated, then existing new_target
+    # entries, then the migrated entries (chronological within each group)
+    remaining = [e for e in entries if e.get("target") != old_target]
+    existing_new = [e for e in remaining if e.get("target") == new_target]
+    rest = [e for e in remaining if e.get("target") != new_target]
+
+    with open(history_path, "w") as f:
+        for entry in rest:
+            f.write(json.dumps(entry) + "\n")
+        for entry in existing_new:
+            f.write(json.dumps(entry) + "\n")
+        for entry in migrated:
+            f.write(json.dumps(entry) + "\n")
+
+    return len(to_migrate)
+
+
 # ── Provider adapter layer (stdlib-only HTTP) ────────────────────────
 
 PROVIDER_ENV_VAR = "SKILL_EVOLUTION_PROVIDER"
@@ -892,10 +945,30 @@ def combine_gate(results: List[EvalResult], strictness: str) -> bool:
 # without modifying this function or apply_proposal()'s call site.
 
 def target_key_for_proposal(proposal: Any) -> str:
-    """Return the shared history-store target key for a proposal (duck-typed, no proposal.py import)."""
+    """Return the shared history-store target key for a proposal (duck-typed, no proposal.py import).
+
+    For ``improve_existing`` proposals (and any other with ``target_skill`` set), returns
+    ``skill:<name>``.  For ``create_new`` proposals where ``target_skill`` is empty, tries
+    to extract the skill name from ``proposed_changes`` (``field="name"``) before falling
+    back to ``proposal:<id>``.  This lets ``RegressionEvaluator`` detect regressions
+    across multiple ``create_new`` proposals for the same skill, and keeps the history
+    lineage connected once the skill exists.
+    """
     target_skill = getattr(proposal, "target_skill", None)
+    if target_skill:
+        return f"skill:{target_skill}"
+
+    # For create_new proposals, try to extract skill name from proposed_changes
+    proposal_type = getattr(getattr(proposal, "type", None), "value", "")
+    if proposal_type == "create_new":
+        for change in getattr(proposal, "proposed_changes", []):
+            if getattr(change, "field", None) == "name":
+                skill_name = getattr(change, "new_value", None)
+                if skill_name:
+                    return f"skill:{skill_name}"
+
     proposal_id = getattr(proposal, "proposal_id", "unknown")
-    return f"skill:{target_skill}" if target_skill else f"proposal:{proposal_id}"
+    return f"proposal:{proposal_id}"
 
 
 def _extract_evaluated_content(proposal: Any) -> Tuple[str, str, Optional[str]]:

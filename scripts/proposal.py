@@ -363,6 +363,23 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
         "evaluation_results": evaluation_results,
     }
 
+    # For create_new proposals, migrate history from proposal:<id> to skill:<name>
+    # so RegressionEvaluator can detect regressions across the skill's full lineage.
+    # Synchronous, idempotent, archive-first (same safety posture as prune_history).
+    if proposal.type == ProposalType.CREATE_NEW and proposal.proposal_id:
+        skill_name = None
+        for change in proposal.proposed_changes:
+            if change.field == "name" and change.new_value:
+                skill_name = change.new_value
+                break
+
+        if skill_name:
+            new_target = f"skill:{skill_name}"
+            migrated = evaluate.migrate_proposal_history(proposal.proposal_id, new_target)
+            if migrated:
+                print(f"Migrated {migrated} history entries from "
+                      f"proposal:{proposal.proposal_id} to {new_target}")
+
     if proposal.type == ProposalType.IMPROVE_EXISTING:
         for change in proposal.proposed_changes:
             instruction = {
