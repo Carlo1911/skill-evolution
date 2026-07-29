@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import pytest
 
-from fetch_sessions import contains_secret
+from fetch_sessions import SECRET_PATTERNS, contains_secret
 
 LEAKED_SHAPES = [
     # generic OpenAI-style key: the original list only had sk-ant-api / sk-or-v1-
@@ -77,3 +77,16 @@ def test_original_fixed_markers_still_detected():
 def test_detection_is_case_insensitive():
     assert contains_secret("PASSWORD=Sup3rS3cretValue")
     assert contains_secret("authorization: bearer abcdefghijklmnopqrstuvwxyz01")
+
+
+def test_gemini_api_key_in_secret_patterns():
+    """R7f: GEMINI_API_KEY is a known pattern, matching the already-present OPENAI_API_KEY.
+
+    Gemini keys are opaque with no stable prefix, so it's the env-var *name*, not a
+    value-shaped regex, that catches them here -- same posture as ANTHROPIC_API_KEY.
+    """
+    assert "GEMINI_API_KEY" in SECRET_PATTERNS
+
+
+def test_gemini_api_key_assignment_is_detected():
+    assert contains_secret("GEMINI_API_KEY=AIzaSyRealValueGoesHere1234567890")

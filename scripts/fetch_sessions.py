@@ -28,7 +28,7 @@ STATE_RETENTION_ENV_VAR = "SKILL_EVOLUTION_STATE_RETENTION"
 # ── Secret patterns — NEVER include these in datasets ──────────────────
 SECRET_PATTERNS = [
     "sk-ant-api", "sk-or-v1-", "ghp_", "ghu_", "xoxb-", "xapp-",
-    "ntn_", "AKIA", "-----BEGIN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+    "ntn_", "AKIA", "-----BEGIN", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY",
     "OPENROUTER_API_KEY", "SLACK_BOT_TOKEN", "GITHUB_TOKEN",
     "AWS_SECRET_ACCESS_KEY", "DATABASE_URL",
 ]

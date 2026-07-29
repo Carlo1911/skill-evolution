@@ -161,6 +161,23 @@ def test_unknown_provider_raises_clear_error():
         call_provider("hi", provider="bogus")
 
 
+def test_unknown_provider_error_lists_openai_and_gemini():
+    with pytest.raises(ProviderError) as excinfo:
+        call_provider("hi", provider="bogus")
+    assert "gemini" in str(excinfo.value)
+    assert "openai" in str(excinfo.value)
+
+
+def test_provider_callers_has_five_registered_providers():
+    assert set(evaluate.PROVIDER_CALLERS) == {"claude", "ollama", "opencode", "openai", "gemini"}
+
+
+def test_redact_secrets_removes_gemini_env_var():
+    redacted = redact_secrets("GEMINI_API_KEY=AIzaSyRealValueGoesHere1234567890")
+    assert "AIzaSyRealValueGoesHere1234567890" not in redacted
+    assert "[REDACTED]" in redacted
+
+
 def test_provider_call_failure_raises_provider_error(monkeypatch):
     def failing_caller(prompt, timeout=60):
         raise ProviderError("simulated timeout")

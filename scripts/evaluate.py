@@ -508,10 +508,67 @@ def _call_opencode(prompt: str, timeout: int = 60) -> str:
         raise ProviderError(f"Unexpected OpenCode Zen response shape: {payload}") from e
 
 
+def _call_openai(prompt: str, timeout: int = 60) -> str:
+    """Call OpenAI's Chat Completions API directly (not via OpenCode Zen's proxy).
+
+    Same OpenAI-compatible request/response shape as `_call_ollama`/`_call_opencode`;
+    what differs is the hosted default model and, like OpenCode, a required API key
+    that fails closed rather than sending an unauthenticated request.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise ProviderError(
+            "OpenAI provider selected but OPENAI_API_KEY is not set. "
+            "Export it (do not commit it) before running evaluators against OpenAI."
+        )
+    base_url = os.environ.get("SKILL_EVOLUTION_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    model = os.environ.get("SKILL_EVOLUTION_OPENAI_MODEL", "gpt-4o")
+    payload = _post_json(
+        f"{base_url.rstrip('/')}/chat/completions",
+        {"model": model, "messages": [{"role": "user", "content": prompt}]},
+        {"authorization": f"Bearer {api_key}"},
+        timeout, "OpenAI",
+    )
+    try:
+        return payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ProviderError(f"Unexpected OpenAI response shape: {payload}") from e
+
+
+def _call_gemini(prompt: str, timeout: int = 60) -> str:
+    """Call Google's Gemini API (v1beta generateContent), a different shape than the
+    OpenAI-compatible callers above: request body is `contents[].parts[].text`, response
+    is `candidates[].content.parts[].text`. Auth is a header (`x-goog-api-key`) rather than
+    a query parameter, keeping the key out of URLs -- same posture as the bearer-token
+    callers above.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise ProviderError(
+            "Gemini provider selected but GEMINI_API_KEY is not set. "
+            "Export it (do not commit it) before running evaluators against Gemini."
+        )
+    base_url = os.environ.get("SKILL_EVOLUTION_GEMINI_BASE_URL",
+                               "https://generativelanguage.googleapis.com")
+    model = os.environ.get("SKILL_EVOLUTION_GEMINI_MODEL", "gemini-2.0-flash")
+    payload = _post_json(
+        f"{base_url.rstrip('/')}/v1beta/models/{model}:generateContent",
+        {"contents": [{"parts": [{"text": prompt}]}]},
+        {"x-goog-api-key": api_key},
+        timeout, "Gemini",
+    )
+    try:
+        return payload["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ProviderError(f"Unexpected Gemini response shape: {payload}") from e
+
+
 PROVIDER_CALLERS = {
     "claude": _call_claude,
     "ollama": _call_ollama,
     "opencode": _call_opencode,
+    "openai": _call_openai,
+    "gemini": _call_gemini,
 }
 
 PROVIDER_TIMEOUT_ENV_VAR = "SKILL_EVOLUTION_PROVIDER_TIMEOUT"
