@@ -156,6 +156,29 @@ def test_post_json_lets_callers_override_the_user_agent(monkeypatch):
     assert captured["request"].get_header("User-agent") == "custom/1.0"
 
 
+def test_post_json_wraps_request_construction_value_error():
+    """A scheme-less/malformed URL makes urllib.request.Request() raise ValueError
+    before urlopen() is ever reached. Previously this escaped _post_json's
+    try/except entirely (which only covered urlopen()) and propagated as a raw
+    ValueError instead of ProviderError -- unreachable via the three original
+    providers' hardcoded default URLs, but newly reachable once operator-set
+    base-URL overrides (e.g. SKILL_EVOLUTION_GEMINI_BASE_URL) can be misconfigured."""
+    with pytest.raises(ProviderError, match="Test provider call failed"):
+        evaluate._post_json("not-a-valid-url-scheme", {"model": "m"}, {}, 30, "Test")
+
+
+def test_post_json_wraps_json_decode_error(monkeypatch):
+    """json.JSONDecodeError subclasses ValueError, so widening _post_json's except
+    clause to ValueError (for the Request-construction fix above) also closes the
+    pre-existing gap where a non-JSON response body escaped as an unhandled
+    JSONDecodeError instead of failing closed as ProviderError."""
+    captured = _capture_request(monkeypatch, response=b"<html>not json</html>")
+
+    with pytest.raises(ProviderError, match="Test provider call failed"):
+        evaluate._post_json("https://example.invalid/v1/chat/completions",
+                            {"model": "m"}, {}, 30, "Test")
+
+
 def test_unknown_provider_raises_clear_error():
     with pytest.raises(ProviderError, match="Unknown provider 'bogus'"):
         call_provider("hi", provider="bogus")

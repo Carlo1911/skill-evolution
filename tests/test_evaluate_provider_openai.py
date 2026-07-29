@@ -103,6 +103,14 @@ def test_malformed_response_shape_raises_provider_error(monkeypatch):
         evaluate._call_openai("hello")
 
 
+def test_handles_empty_choices(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(evaluate, "_post_json", lambda *a, **k: {"choices": []})
+
+    with pytest.raises(ProviderError, match="Unexpected OpenAI"):
+        evaluate._call_openai("hello")
+
+
 def test_redaction_runs_before_the_openai_request(monkeypatch, captured_post):
     """A secret in the prompt must never reach the hosted endpoint."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")

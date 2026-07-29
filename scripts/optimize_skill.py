@@ -259,7 +259,7 @@ def _reflection_lm_adapter(prompt):
         prompt = "\n\n".join(m.get("content", "") for m in prompt if isinstance(m, dict))
     try:
         return evaluate.call_provider(prompt, evaluator_name=GEPA_REFLECTION_EVALUATOR_NAME)
-    except evaluate.ProviderError:
+    except (evaluate.ProviderError, ValueError):
         return ""
 
 

@@ -199,7 +199,7 @@ The `deterministic` evaluator (size/growth checks) is meaningful only for skill 
 | `SKILL_EVOLUTION_MAX_CUMULATIVE_GROWTH_PCT` | `50` | Total growth vs the skill's *original* recorded size |
 | `SKILL_EVOLUTION_MAX_CUMULATIVE_SHRINK_PCT` | `30` | Total shrink vs the original; bounds compounding erosion |
 | `SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD` | `0.7` | Minimum average rubric score to pass |
-| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude`, `ollama` or `opencode`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER` |
+| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude`, `ollama`, `opencode`, `openai`, or `gemini`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER` |
 | `SKILL_EVOLUTION_PROVIDER_TIMEOUT` | `60` | HTTP timeout (seconds) for every provider call — one generic knob, since the latency it exists for is a property of the model, not the adapter. Raise it for local reasoning models, which spend much of their output on chain-of-thought before the JSON |
 | `ANTHROPIC_API_KEY` | — | Required by the `claude` provider |
 | `SKILL_EVOLUTION_CLAUDE_MODEL` | `claude-sonnet-5` | Model used by the Claude provider adapter |
@@ -207,6 +207,12 @@ The `deterministic` evaluator (size/growth checks) is meaningful only for skill 
 | `OPENCODE_API_KEY` | — | Required by the `opencode` provider; fails closed if unset |
 | `SKILL_EVOLUTION_OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | Zen carries `big-pickle` and the `*-free` models; the Go tier (`/zen/go/v1`) is a different, smaller catalogue — point this at the tier matching your model id |
 | `SKILL_EVOLUTION_OPENCODE_MODEL` | `big-pickle` | Model id from the chosen catalogue |
+| `OPENAI_API_KEY` | — | Required by the `openai` provider; fails closed if unset |
+| `SKILL_EVOLUTION_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
+| `SKILL_EVOLUTION_OPENAI_MODEL` | `gpt-4o` | Model used by the OpenAI provider adapter |
+| `GEMINI_API_KEY` | — | Required by the `gemini` provider; fails closed if unset |
+| `SKILL_EVOLUTION_GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Gemini API base URL |
+| `SKILL_EVOLUTION_GEMINI_MODEL` | `gemini-2.0-flash` | Model used by the Gemini provider adapter |
 | `SKILL_EVOLUTION_HISTORY_PATH` | `docs/skill-evolution/eval_history.jsonl` | Shared eval history file |
 | `SKILL_EVOLUTION_HISTORY_RETENTION` | unbounded | Max versions (bare int) or age (`90d`, `6mo`); always keeps up to 3 anchor entries per target (most recent, most recent passing, earliest); applies automatically after every evaluation, not just via `--prune` |
 | `SKILL_EVOLUTION_HISTORY_ARCHIVE_PATH` | sibling of the history file (`eval_history.archive.jsonl`) | Where entries pruned by the above are moved, not deleted |

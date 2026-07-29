@@ -421,20 +421,20 @@ def _post_json(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout:
     Wraps transport failures in ProviderError; response-shape validation is
     the caller's job since each provider's payload shape differs.
     """
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        # Identify the client by project name: urllib's default ("Python-urllib/x.y") is
-        # blanket-blocked by some gateways -- OpenCode Zen answers 403 for it and 200 for
-        # the byte-identical request under any descriptive UA. `headers` wins, so a caller
-        # can still override it.
-        headers={"content-type": "application/json", "user-agent": USER_AGENT, **headers},
-        method="POST",
-    )
     try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            # Identify the client by project name: urllib's default ("Python-urllib/x.y") is
+            # blanket-blocked by some gateways -- OpenCode Zen answers 403 for it and 200 for
+            # the byte-identical request under any descriptive UA. `headers` wins, so a caller
+            # can still override it.
+            headers={"content-type": "application/json", "user-agent": USER_AGENT, **headers},
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError) as e:
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
         raise ProviderError(f"{provider_label} provider call failed: {e}") from e
 
 
