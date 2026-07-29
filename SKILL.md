@@ -186,6 +186,44 @@ The v1 auto-apply gate (`apply_proposal()`) is wired only for **skill text**. Th
 
 The `deterministic` evaluator (size/growth checks) is meaningful only for skill text. For the other three targets, set `SKILL_EVOLUTION_EVALUATORS=llm_judge,regression` to skip it.
 
+## Command Reference
+
+Every script is a standalone CLI; none of them requires the skill to be loaded in a session.
+
+```bash
+# --- Pipeline ---
+python3 scripts/fetch_sessions.py --dry-run        # preview sessions without marking them processed
+python3 scripts/fetch_sessions.py | python3 scripts/analyze.py   # NDJSON -> LLM-ready prompt text
+python3 scripts/skill_index.py                     # scan installed skills -> JSON index
+python3 scripts/fetch_sessions.py --prune-state    # prune processed-session state (reports on stderr)
+
+# --- Proposals ---
+python3 scripts/proposal.py --example              # print an example proposal
+python3 scripts/proposal.py --list                 # list current proposals
+python3 scripts/proposal.py --show <id>            # show one proposal
+
+# --- Evaluation gate ---
+python3 scripts/evaluate.py --list-evaluators      # show the resolved evaluator set
+python3 scripts/evaluate.py --retroactive --dry-run    # preview re-evaluation of saved proposals
+python3 scripts/evaluate.py --retroactive              # re-evaluate and append history
+python3 scripts/evaluate.py --prune                    # prune history per the retention var
+
+# --- The three observability-only targets (never gate auto-apply) ---
+# `deterministic` is meaningless for these, so opt out of it:
+SKILL_EVOLUTION_EVALUATORS=llm_judge,regression \
+  python3 scripts/evaluate.py --eval-target proposal --proposal-id <id>
+SKILL_EVOLUTION_EVALUATORS=llm_judge,regression \
+  python3 scripts/evaluate.py --eval-target tool_calls --session-id <id>
+SKILL_EVOLUTION_EVALUATORS=llm_judge,regression \
+  python3 scripts/evaluate.py --eval-target analyzer_prompt --session-id <id> --proposal-id <id>
+
+# --- Optional GEPA optimizer (needs the `gepa` extra) ---
+export SKILL_EVOLUTION_OPTIMIZER_ENABLED=true
+python3 scripts/optimize_skill.py --list-candidates              # low-scoring `skill:` targets
+python3 scripts/optimize_skill.py --list-candidates --target all # include the other three namespaces
+python3 scripts/optimize_skill.py --skill <name> [--iterations N]
+```
+
 ## Evaluation Environment Variables
 
 | Variable | Default | Purpose |

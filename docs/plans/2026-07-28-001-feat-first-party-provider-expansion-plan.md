@@ -1,11 +1,36 @@
 # First-party Provider Expansion — OpenAI & Gemini
 
 - **Date:** 2026-07-28
-- **Status:** Draft
+- **Status:** **Shipped 2026-07-28** (commits `607151e`, `90b64cb`)
 - **Author:** Carlo
 - **Tags:** `provider`, `openai`, `gemini`, `evaluation`
 - **Upstream product contract:** `docs/plans/2026-07-23-001-feat-skill-evolution-evaluation-plan.md` — R7, KD5, KD6. Already `implementation-ready`.
 - **Upstream contract classification:** Implementation-ready plan with deferred item (R7's first-party provider branches). This plan implements that deferred item.
+
+> **Status as of 2026-07-28.** All of U1–U3 shipped as written; U4 was a no-op by design.
+> Every Definition-of-Done item below is met: `PROVIDER_CALLERS` has five entries,
+> `resolve_provider()` resolves both new names through all three tiers with no new
+> resolution logic, both branches fail closed on a missing key and on a malformed response,
+> `GEMINI_API_KEY` is in `fetch_sessions.SECRET_PATTERNS`, and the unknown-provider message
+> lists both names via `sorted(PROVIDER_CALLERS)`. Tests: `tests/test_evaluate_provider_openai.py`
+> (11), `tests/test_evaluate_provider_gemini.py` (12), plus additions to
+> `tests/test_evaluate_providers.py` and `tests/test_fetch_sessions_secrets.py`.
+>
+> **A follow-up review pass (`90b64cb`) found one defect this plan did not anticipate.**
+> Making the base URL operator-configurable for two more providers newly exposed a latent
+> gap in the shared `_post_json()`: `urllib.request.Request()` was constructed *outside*
+> its `try/except`, so a scheme-less base-URL override raised a bare `ValueError` rather
+> than `ProviderError` — and `optimize_skill._reflection_lm_adapter()` caught only
+> `ProviderError`, so an unattended GEPA run would crash mid-flight (`gepa==0.1.4`'s engine
+> defaults to `raise_on_exception=True`). Both were fixed; widening the except clause to
+> `ValueError` also closed the pre-existing `json.JSONDecodeError`/`UnicodeDecodeError`
+> escape, since both subclass `ValueError`. The same pass updated `SKILL.md`'s config table
+> (which this plan's scope note had not covered) and added the OpenAI empty-`choices` test
+> that the Gemini side already had.
+>
+> **Still deferred, unchanged:** MiniMax and Kimi K2 first-party branches, and a generic
+> OpenAI-compatible catch-all adapter. Neither adapter has been exercised against a live
+> endpoint — both are unit-tested against a stubbed `_post_json` only.
 
 ---
 

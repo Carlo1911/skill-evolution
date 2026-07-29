@@ -424,7 +424,7 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 | # | Item | Status |
 |---|---|---|
 | 1 | ~~**Evaluation coverage expansion**~~ (eval plan R5) | **RESOLVED 2026-07-27.** Three fast-follow targets added as sibling functions to `evaluate_skill_text()`: `evaluate_proposal()`, `evaluate_tool_calls()`, `evaluate_analyzer_prompt()`. Each writes to history with its own namespace (`proposal:<uuid>`, `tool_calls:<session_id>`, `analyzer_prompt:<session_id>`). CLI: `--eval-target` flag in `evaluate.py`, `--target skill|all` filter in `optimize_skill.py --list-candidates`. Observability-first: new targets write to history but do not gate auto-apply (KTD3). Plan: `docs/plans/2026-07-27-002-feat-evaluation-coverage-expansion-plan.md`. |
-| 2 | **Provider coverage expansion** (R7) | **RESOLVED 2026-07-28** for the first-party gap; MiniMax/Kimi K2 still deferred. `claude`, `ollama`, `opencode`, `openai`, `gemini` are all registered in `PROVIDER_CALLERS`. OpenCode Zen remains the OpenAI-compatible proxy path to MiniMax/Kimi/GLM/DeepSeek/Qwen. Plan: `docs/plans/2026-07-28-001-feat-first-party-provider-expansion-plan.md`. |
+| 2 | ~~**Provider coverage expansion**~~ (R7) | **RESOLVED 2026-07-28** for the first-party gap; MiniMax/Kimi K2 still deferred. `claude`, `ollama`, `opencode`, `openai`, `gemini` are all registered in `PROVIDER_CALLERS`. OpenCode Zen remains the OpenAI-compatible proxy path to MiniMax/Kimi/GLM/DeepSeek/Qwen. Plan: `docs/plans/2026-07-28-001-feat-first-party-provider-expansion-plan.md`. |
 | 3 | **Human-in-the-loop evaluator** (R3) | **Not started**, deferred pending a trigger scenario. None has appeared. |
 | 4 | **Skill quality tracking** (`dataset_builder.py`, `skill_quality.py` — integration-plan Fase 2) | **Not started.** Neither file exists. No longer blocks anything: the optimizer uses real sessions as its trainset. |
 | 5 | ~~**Production cron**~~ | **Closed** — superseded by P0-1 and done. The cron already pointed here; its *scripts* now do too. |
@@ -502,10 +502,11 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
   `SKILL.md` (body changes only, best-effort, shared with `evaluate_and_record()` so history
   records the size that was judged), mirroring the distrust
   `optimize_skill._resolve_baseline_size_bytes()` already applied at draft time.
-- **`create_new` proposals can never regress.** Empty `target_skill` → target key falls
-  back to `proposal:<uuid>`, so each gets a single-entry lineage and `RegressionEvaluator`
-  always reports "no baseline yet". Regression coverage is effectively
-  `improve_existing`-only.
+- ~~**`create_new` proposals can never regress.**~~ **RESOLVED 2026-07-27** — this is the
+  same finding as P1-3 above, listed twice; see that section for the fix
+  (`target_key_for_proposal()` derives the skill name from `proposed_changes`, and
+  `migrate_proposal_history()` reconnects `proposal:<id>` history to `skill:<name>` after
+  creation).
 - ~~**`prune_history()` deletes only.**~~ **RESOLVED 2026-07-26** — full design in
   [`2026-07-26-001-fix-history-and-state-pruning-plan.md`](plans/2026-07-26-001-fix-history-and-state-pruning-plan.md).
   Pruned entries are now **archived**, not discarded — appended to a sibling file
@@ -650,7 +651,13 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 5. ~~**P1-3** — create_new regression support.~~ **Done 2026-07-27**: `target_key_for_proposal()` fallback, `migrate_proposal_history()`, synchronous integration in `apply_proposal()`.
 6. ~~**P2-1..P2-5** — documentation, batched.~~ **Done 2026-07-26** (P2-3, P2-4 closed 2026-07-27).
 7. ~~**P3 #1** — evaluation coverage expansion.~~ **Done 2026-07-27**: `evaluate_proposal()`, `evaluate_tool_calls()`, `evaluate_analyzer_prompt()`, CLI `--eval-target` flag, `--list-candidates --target skill|all` filter.
-8. Then choose between **item 8** (multi-agent, highest owner interest) and **item 2**
-   (provider coverage expansion).
+8. ~~**P3 #2** — provider coverage expansion.~~ **Done 2026-07-28**: first-party `openai`
+   and `gemini` branches; MiniMax/Kimi K2 stay deferred behind the OpenCode Zen proxy path.
+9. Next: **P3 #7** (host-agnostic / multi-agent support) is the highest owner interest, and
+   **P3 #8** (publication) is one owner decision — a git remote — away from done.
 
-Items 3, 4, and 7 have no trigger yet; leaving them is the right call.
+Items 3, 4, and 6 have no trigger yet; leaving them is the right call.
+
+> **This file stops here.** It was written as the 2026-07-26 consolidated backlog and its
+> P0–P2 sections are closed. The live inventory of what is left continues in
+> [`pending-work-2026-07-28.md`](pending-work-2026-07-28.md).

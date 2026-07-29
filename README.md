@@ -90,6 +90,31 @@ The absolute cap is a **ratchet**: a skill already over the limit can still be r
 
 Note that **no automated step applies a proposal.** The analysis run writes proposals and stops; the analyzer prompt forbids it from calling `skill_manage` whatever the confidence. `apply_proposal()` is invoked by a human, or by a step you write. See `SKILL.md` for the details and `SKILL_EVOLUTION_*` environment variables.
 
+### LLM providers
+
+The judge runs against whichever provider you have credentials for — five stdlib-only
+adapters, no SDK and no LiteLLM:
+
+| `SKILL_EVOLUTION_PROVIDER` | Needs | Default model |
+|---|---|---|
+| `claude` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
+| `ollama` | a local server | `llama3` |
+| `opencode` | `OPENCODE_API_KEY` | `big-pickle` |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| `gemini` | `GEMINI_API_KEY` | `gemini-2.0-flash` |
+
+Each evaluator can override the global choice (`SKILL_EVOLUTION_<EVALUATOR>_PROVIDER`), so
+the judge can run somewhere different from the optimizer's reflection step. Every prompt is
+run through secret redaction and PII masking before it leaves the machine.
+
+### Evaluation targets
+
+The framework scores four independent targets into one shared history file: **skill text**
+(the only one that gates auto-apply), plus **proposal quality**, **tool-call quality**, and
+**analyzer-prompt quality** — the last three are observability-only, inspectable via
+`evaluate.py --eval-target` and `optimize_skill.py --list-candidates --target all`. See
+`SKILL.md` for the full command reference.
+
 ## Optional: GEPA Optimizer
 
 ```bash

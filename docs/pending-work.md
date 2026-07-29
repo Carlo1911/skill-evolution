@@ -1,15 +1,18 @@
 # Pending Work
 
-> **The actionable backlog now lives in [`pending-work-2026-07-26.md`](pending-work-2026-07-26.md)**,
-> which consolidates every deferred item across all repo documents, re-verified against
-> the code, and prioritizes them. It also records three findings this file predates: that
-> production runs an older copy of the pipeline from `ai-memory-stack` (so today's fixes
-> are not live), that the plan's PII risk never got its stated sign-off, and that
-> malformed numeric env vars crash the gate.
+> **The live backlog is [`pending-work-2026-07-28.md`](pending-work-2026-07-28.md)** — read
+> that one for what is still open. [`pending-work-2026-07-26.md`](pending-work-2026-07-26.md)
+> is the closed 2026-07-26 consolidation: it gathered every deferred item across the repo,
+> re-verified each against the code, and prioritized them; its P0–P2 sections are all
+> resolved, so keep it for the reasoning behind those decisions rather than for status. It
+> also records three findings this file predates: that production ran an older copy of the
+> pipeline from `ai-memory-stack` (since fixed), that the plan's PII risk never got its
+> stated sign-off (since recorded), and that malformed numeric env vars crashed the gate
+> (since guarded).
 >
 > This file remains the **evidence record** — the Fase 0 validation narrative, the measured
-> numbers, the retracted conclusion, and the bug post-mortems. The backlog references it
-> rather than restating it, so the two do not drift.
+> numbers, the retracted conclusion, and the bug post-mortems. The backlogs reference it
+> rather than restating it, so the three do not drift.
 
 Status snapshot as of 2026-07-26, after the real GEPA optimizer (see
 `docs/plans/2026-07-24-001-feat-real-gepa-optimizer-plan.md`), the
@@ -24,21 +27,21 @@ inventory, not a committed roadmap — pick an item, then run it through
 
 Seven areas were identified against `docs/plans/2026-07-23-001-feat-skill-evolution-evaluation-plan.md`
 and `docs/integration-plan.md`. The GEPA optimizer was one; items 1–6 are the
-rest. Item 7 is newer and did not come from that analysis. Two have moved during
-the Fase 0 pass below — item 2 is now partially done (OpenCode Zen landed) and
-item 5's cold-start blocker is closed — so read each item's own status rather
-than assuming the whole list is untouched.
+rest. Item 7 is newer and did not come from that analysis. **Items 1 and 2 have
+since shipped in full** (2026-07-27 and 2026-07-28), and item 5's cold-start
+blocker is closed — so read each item's own status rather than assuming the whole
+list is untouched. The current live inventory is
+[`pending-work-2026-07-28.md`](pending-work-2026-07-28.md).
 
-1. **Evaluation coverage expansion.** Only `evaluate_skill_text()` exists.
-   Missing: proposal-quality, tool-call-quality, and analyzer-prompt-quality
-   evaluation targets (evaluation plan's R5 fast-follow scope). Reuses the
-   existing evaluator registry and gate — no dependency on GEPA.
-2. **Provider coverage expansion.** *(Partially done.)* Claude,
-   Ollama/llama.cpp, and **OpenCode Zen** (`opencode`) are implemented — the
-   latter is an OpenAI-compatible gateway, so it reaches MiniMax, Kimi, GLM,
-   DeepSeek and Qwen families through one adapter, covering most of R7's named
-   targets by proxy. Still missing as first-party branches: OpenAI and Gemini
-   direct. See the OpenCode notes at the bottom for the Zen-vs-Go catalogue trap.
+1. ~~**Evaluation coverage expansion.**~~ **DONE 2026-07-27.** All three fast-follow
+   targets shipped as siblings to `evaluate_skill_text()`: `evaluate_proposal()`,
+   `evaluate_tool_calls()`, `evaluate_analyzer_prompt()`. They write to history
+   but deliberately do not gate auto-apply.
+2. ~~**Provider coverage expansion.**~~ **DONE 2026-07-28** for the first-party gap.
+   Five adapters now: `claude`, `ollama`, `opencode`, `openai`, `gemini`. OpenCode
+   Zen remains the OpenAI-compatible gateway reaching MiniMax, Kimi, GLM, DeepSeek
+   and Qwen by proxy, so first-party MiniMax/Kimi K2 branches stay deferred. See the
+   OpenCode notes at the bottom for the Zen-vs-Go catalogue trap.
 3. **Human-in-the-loop evaluator.** Deferred from the evaluation plan's R3;
    no concrete trigger scenario has justified building it yet.
 4. **Skill quality tracking (`docs/integration-plan.md` Fase 2).**

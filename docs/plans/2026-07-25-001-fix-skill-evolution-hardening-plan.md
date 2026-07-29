@@ -19,8 +19,13 @@ execution: code
 > reversed once that became true, since an unattended nightly run should not die on a typo'd
 > env var (backlog P0-3).
 >
-> Still open from here: the three optimizer tunables it made configurable (3 / 20 / 20) have
-> never been tuned against real usage.
+> Still open from here: of the three optimizer tunables it made configurable (3 / 20 / 20),
+> only `DEFAULT_MAX_METRIC_CALLS` has since been tuned against real usage — moved **20 → 8**
+> on the evidence of three real GEPA runs (a 4-call run already surfaced both a score gain
+> and the pathological-growth failure, so 20 meant a 10+ minute unattended foreground call).
+> `MIN_SESSIONS` (3) and `DEFAULT_MAX_SESSIONS_FOR_SKILL` (20) are still untuned: none of
+> those runs tested `MIN_SESSIONS`'s boundary, and both 8- and 20-session trainsets ran fine,
+> so neither has evidence pointing anywhere.
 
 
 # Skill Evolution Pipeline Hardening - Plan

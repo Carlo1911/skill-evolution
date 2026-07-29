@@ -1,8 +1,26 @@
 # Plan: Evaluation coverage expansion (R5, R6)
 
 > Created: 2026-07-27
-> Status: Draft
+> Status: **Shipped 2026-07-27** (commit `593c999`)
 > Origin: `docs/pending-work-2026-07-26.md` P3 #1 ("Evaluation coverage expansion")
+
+> **Status as of 2026-07-28.** All five units shipped. `evaluate_proposal()`,
+> `evaluate_tool_calls()` and `evaluate_analyzer_prompt()` exist as sibling functions to
+> `evaluate_skill_text()`, each with its own history namespace (`proposal:<uuid>`,
+> `tool_calls:<session_id>`, `analyzer_prompt:<session_id>`), covered by
+> `tests/test_evaluate_proposal_target.py`, `tests/test_evaluate_tool_calls_target.py` and
+> `tests/test_evaluate_analyzer_prompt_target.py`. KTD1's seam constraint held: neither
+> `evaluate_skill_text()` nor `apply_proposal()`'s call site was modified.
+>
+> **Two deviations from the text below, both deliberate.** U4 named the flag `--target
+> <key>`; it shipped as **`--eval-target`** because `--target` was already taken by
+> `--retroactive`'s filter, and reusing it would have made one flag mean two things.
+> OQ3 resolved to a separate `--target skill|all` on `optimize_skill.py --list-candidates`
+> rather than a shared vocabulary between the two scripts.
+>
+> **OQ1 resolved as "no".** The three new targets are observability-first: they write to
+> history but do not gate auto-apply (KTD3). Wiring them into the gate remains an open
+> decision — see `docs/pending-work-2026-07-28.md`.
 
 ## Goal
 

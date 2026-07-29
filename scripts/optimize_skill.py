@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optional GEPA-lite optimizer: runs a GEPA optimization pass over one
+"""Optional GEPA optimizer: runs a real `gepa.optimize_anything()` pass over one
 installed skill's body against its own recorded session history, and drafts
 a skill-improvement proposal through the normal proposal/gate path.
 
@@ -745,7 +745,11 @@ def main():
         )
         return
 
-    parser = argparse.ArgumentParser(description="GEPA-lite skill optimizer")
+    parser = argparse.ArgumentParser(
+        description="GEPA skill optimizer — runs a real gepa.optimize_anything() loop "
+                    "over a skill's own recorded session history and drafts a proposal "
+                    "from the winner (never applies it)"
+    )
     parser.add_argument("--skill", help="Run GEPA optimization for this installed skill by name")
     parser.add_argument("--iterations", type=int, default=None, help="Override the metric-call budget")
     parser.add_argument(
