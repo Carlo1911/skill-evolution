@@ -171,6 +171,21 @@ This skill ships with ready-to-use scripts. On first load, the agent checks if t
 
 No pip packages required beyond Python stdlib for the core pipeline. `gepa==0.1.4` (the standalone PyPI package, **not** `dspy`) is an optional extra (`pip install -e ".[optimizer]"`) needed only for `scripts/optimize_skill.py`. Install it into the interpreter you will run that script with; the rest of the pipeline runs under any `python3`.
 
+## Evaluation Targets
+
+The evaluation framework scores four independent targets, each writing to the same history file with its own namespace:
+
+| Target | Function | History key | What it scores |
+|--------|----------|-------------|----------------|
+| **skill text** (v1) | `evaluate_skill_text()` | `skill:<name>` | The body/description change in a proposal — size, growth, frontmatter structure, rubric quality, regression vs prior passes |
+| **proposal quality** | `evaluate_proposal()` | `proposal:<uuid>` | The proposal as a document — summary clarity, rationale groundedness, change coherence |
+| **tool-call quality** | `evaluate_tool_calls()` | `tool_calls:<session_id>` | Tool selection, sequencing, and result extraction from the session that produced the proposal |
+| **analyzer prompt quality** | `evaluate_analyzer_prompt()` | `analyzer_prompt:<session_id>` | Whether the analyzer's generation step produced a proposal grounded in the sessions it was given |
+
+The v1 auto-apply gate (`apply_proposal()`) is wired only for **skill text**. The other three targets are **observability-first**: they write to history and can be inspected via `--list-candidates` or `--eval-target`, but do not gate auto-apply. Wiring them into the gate is a separate decision.
+
+The `deterministic` evaluator (size/growth checks) is meaningful only for skill text. For the other three targets, set `SKILL_EVOLUTION_EVALUATORS=llm_judge,regression` to skip it.
+
 ## Evaluation Environment Variables
 
 | Variable | Default | Purpose |

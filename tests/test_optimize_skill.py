@@ -480,12 +480,18 @@ def test_run_gepa_optimization_missing_optional_dependency_gives_clear_actionabl
 def _make_gepa_result(best_candidate="---\nname: my-skill\ndescription: a test skill\n---\n\noptimized skill body text",
                        val_aggregate_scores=(0.5, 0.8, 0.65),
                        best_idx=1,
-                       total_metric_calls=15):
+                       total_metric_calls=15,
+                       candidates=None):
+    n = len(val_aggregate_scores)
+    if candidates is None:
+        candidates = [{"_string": best_candidate} for _ in range(n)]
     return types.SimpleNamespace(
         best_candidate=best_candidate,
         val_aggregate_scores=list(val_aggregate_scores),
         best_idx=best_idx,
         total_metric_calls=total_metric_calls,
+        candidates=candidates,
+        _str_candidate_key="_string",
     )
 
 
@@ -515,14 +521,27 @@ def test_draft_proposal_from_gepa_result_omits_call_count_when_absent():
 
 
 def test_draft_proposal_from_gepa_result_rationale_reports_winner_and_runner_up():
-    """Covers R9: rationale names candidate count and distinguishes winner from runner-up."""
-    result = _make_gepa_result(val_aggregate_scores=[0.5, 0.8, 0.65], best_idx=1)
+    """Covers R9: rationale names candidate count, winner/runner-up scores, and the
+    qualitative structural trade-off the runner-up made."""
+    winner_body = "---\nname: my-skill\ndescription: a test skill\n---\n\n# Overview\nFull skill body with all sections.\n## Details\nMore content here.\n"
+    runner_up_body = "---\nname: my-skill\ndescription: a test skill\n---\n\n# Overview\nTrimmed body.\n"
+    seed_body = "---\nname: my-skill\ndescription: outdated\n---\n\nOld body here.\n"
+
+    result = _make_gepa_result(
+        best_candidate=winner_body,
+        val_aggregate_scores=[0.5, 0.8, 0.65],
+        best_idx=1,
+        candidates=[{"_string": seed_body}, {"_string": winner_body}, {"_string": runner_up_body}],
+    )
 
     drafted = optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
 
     assert "3" in drafted.rationale  # number of candidates explored
     assert "0.8" in drafted.rationale  # winning score
     assert "0.65" in drafted.rationale  # runner-up score (second-highest, excluding winner)
+    # Qualitative trade-off: runner-up is smaller and has fewer headings
+    assert "smaller" in drafted.rationale.lower()
+    assert "heading" in drafted.rationale.lower()
 
 
 def test_draft_proposal_from_gepa_result_reports_seed_to_winner_delta():
@@ -539,7 +558,13 @@ def test_draft_proposal_from_gepa_result_reports_seed_to_winner_delta():
 
 def test_draft_proposal_from_gepa_result_single_candidate_has_no_runner_up():
     """Edge case: only one candidate explored -- must not crash, and must note no runner-up."""
-    result = _make_gepa_result(val_aggregate_scores=[0.7], best_idx=0)
+    body = "---\nname: solo-skill\ndescription: solo\n---\n\nbody."
+    result = _make_gepa_result(
+        best_candidate=body,
+        val_aggregate_scores=[0.7],
+        best_idx=0,
+        candidates=[{"_string": body}],
+    )
 
     drafted = optimize_skill.draft_proposal_from_gepa_result("solo-skill", result)
 
@@ -799,7 +824,7 @@ def test_list_candidates_prints_targets_and_writes_no_proposal(monkeypatch, caps
     fake_targets = [
         {"target": "skill:weak-skill", "score": 0.3, "feedback": "Too verbose and unclear."},
     ]
-    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda: fake_targets)
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda target_namespace="skill": fake_targets)
 
     save_called = []
     monkeypatch.setattr(
@@ -820,7 +845,7 @@ def test_list_candidates_prints_targets_and_writes_no_proposal(monkeypatch, caps
 def test_list_candidates_with_no_targets_prints_clear_message(monkeypatch, capsys):
     monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
     monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--list-candidates"])
-    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda: [])
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda target_namespace="skill": [])
 
     optimize_skill.main()
 

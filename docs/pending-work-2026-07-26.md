@@ -421,7 +421,7 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 
 | # | Item | Status |
 |---|---|---|
-| 1 | **Evaluation coverage expansion** — proposal-quality, tool-call-quality, analyzer-prompt-quality targets (eval plan R5) | **Not started.** Only `evaluate_skill_text()` exists; registry holds exactly 3 evaluators. The seam is a comment (`evaluate.py:754-758`). Note R6's `messages.tool_calls` read path already exists but only for session *selection* (`fetch_sessions.py:289`), not evaluation. Blocks the plan's own "shared-core extensibility is provisional" claim from being validated. |
+| 1 | ~~**Evaluation coverage expansion**~~ (eval plan R5) | **RESOLVED 2026-07-27.** Three fast-follow targets added as sibling functions to `evaluate_skill_text()`: `evaluate_proposal()`, `evaluate_tool_calls()`, `evaluate_analyzer_prompt()`. Each writes to history with its own namespace (`proposal:<uuid>`, `tool_calls:<session_id>`, `analyzer_prompt:<session_id>`). CLI: `--eval-target` flag in `evaluate.py`, `--target skill|all` filter in `optimize_skill.py --list-candidates`. Observability-first: new targets write to history but do not gate auto-apply (KTD3). Plan: `docs/plans/2026-07-27-002-feat-evaluation-coverage-expansion-plan.md`. |
 | 2 | **Provider coverage expansion** (R7) | **Partial.** `claude`, `ollama`, `opencode`. OpenCode Zen is OpenAI-compatible so it reaches MiniMax/Kimi/GLM/DeepSeek/Qwen by proxy — most of R7's named targets. Missing: first-party OpenAI and Gemini branches. |
 | 3 | **Human-in-the-loop evaluator** (R3) | **Not started**, deferred pending a trigger scenario. None has appeared. |
 | 4 | **Skill quality tracking** (`dataset_builder.py`, `skill_quality.py` — integration-plan Fase 2) | **Not started.** Neither file exists. No longer blocks anything: the optimizer uses real sessions as its trainset. |
@@ -569,9 +569,10 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
   keeps working. A blank/whitespace value is ignored rather than redirecting state to `""`.
   Still true and still worth knowing: once dedup works, `fetch_sessions.py --dry-run`
   legitimately returns 0 sessions — correct, but it looks like a failure.
-- **R9's runner-up narrative is score-only.** The plan asks the rationale to report *what
-  trade-off* the runner-up made; the code reports its score and margin, not a qualitative
-  description.
+- ~~**R9's runner-up narrative is score-only.**~~ **RESOLVED 2026-07-28.** The rationale now
+  includes a qualitative structural comparison of the runner-up against the winner (byte-size
+  difference and heading-count delta), generated from `result.candidates` with no extra
+  provider call. Falls back gracefully to score-only when the candidates list is unavailable.
 - ~~**`sessions_for_skill()` does not degrade on a missing/empty DB**~~ — **RESOLVED
   2026-07-26.** `_session_db_is_readable()` checks existence and the `sessions` table
   *before* `sqlite3.connect()`, returning `[]` with a stderr warning. Checking first also
@@ -646,7 +647,8 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 4. ~~**P1-1, P1-2** — close today's own two gaps.~~ **Done 2026-07-26.**
 5. ~~**P1-3** — create_new regression support.~~ **Done 2026-07-27**: `target_key_for_proposal()` fallback, `migrate_proposal_history()`, synchronous integration in `apply_proposal()`.
 6. ~~**P2-1..P2-5** — documentation, batched.~~ **Done 2026-07-26** (P2-3, P2-4 closed 2026-07-27).
-7. Then choose between **item 8** (multi-agent, highest owner interest) and **item 2**
-   (evaluation coverage, unblocks the shared-core claim).
+7. ~~**P3 #1** — evaluation coverage expansion.~~ **Done 2026-07-27**: `evaluate_proposal()`, `evaluate_tool_calls()`, `evaluate_analyzer_prompt()`, CLI `--eval-target` flag, `--list-candidates --target skill|all` filter.
+8. Then choose between **item 8** (multi-agent, highest owner interest) and **item 2**
+   (provider coverage expansion).
 
 Items 3, 4, and 7 have no trigger yet; leaving them is the right call.

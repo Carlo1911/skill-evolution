@@ -940,9 +940,13 @@ def combine_gate(results: List[EvalResult], strictness: str) -> bool:
 
 # ── Skill-text evaluation target ─────────────────────────────────────
 #
-# A fast-follow target (e.g. evaluate_tool_calls(session)) can be added as a
-# sibling function reusing the same registry and gate (run_evaluators)
-# without modifying this function or apply_proposal()'s call site.
+# Three fast-follow targets (R5) exist as sibling functions reusing the same
+# registry and gate (run_evaluators) without modifying this function or
+# apply_proposal()'s call site:
+#
+#   evaluate_proposal(proposal)         -> target "proposal:<uuid>"
+#   evaluate_tool_calls(session|msgs)   -> target "tool_calls:<session_id>"
+#   evaluate_analyzer_prompt(sess, pid) -> target "analyzer_prompt:<session_id>"
 
 def target_key_for_proposal(proposal: Any) -> str:
     """Return the shared history-store target key for a proposal (duck-typed, no proposal.py import).
@@ -1071,6 +1075,190 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     original = original_size_for_target(target)
     if original:
         context["original_size"] = original
+
+    return run_evaluators(content, target, context=context)
+
+
+def evaluate_proposal(proposal: Any) -> List[EvalResult]:
+    """Evaluate a proposal's quality as a document — summary, rationale, and changes.
+
+    This is a fast-follow target (R5) that reuses the same evaluator registry and
+    provider layer as evaluate_skill_text(). It does not modify the skill text,
+    so there is no baseline for growth/shrink checks. DeterministicEvaluator is
+    opt-in only (via SKILL_EVOLUTION_EVALUATORS) since size limits are meaningless
+    for a free-form proposal document.
+    """
+    # Always use proposal:<uuid> as the target key for proposal-quality evaluation,
+    # regardless of whether the proposal has a target_skill. This keeps the
+    # proposal-quality lineage separate from the skill-text lineage.
+    proposal_id = getattr(proposal, "proposal_id", "unknown")
+    target = f"proposal:{proposal_id}"
+
+    # Build content from the proposal's summary, rationale, and proposed_changes
+    parts = []
+    if getattr(proposal, "summary", None):
+        parts.append(f"# Summary\n{proposal.summary}")
+    if getattr(proposal, "rationale", None):
+        parts.append(f"# Rationale\n{proposal.rationale}")
+    changes = getattr(proposal, "proposed_changes", [])
+    if changes:
+        changes_text = "\n".join(
+            f"- {getattr(c, 'field', '')}: {getattr(c, 'new_value', '')}"
+            for c in changes
+        )
+        parts.append(f"# Proposed Changes\n{changes_text}")
+
+    content = "\n\n".join(parts) if parts else "(empty proposal)"
+    content_kind = "proposal"
+
+    # No baseline for proposals — they are evaluated on their own merits
+    context = {"content_kind": content_kind}
+
+    return run_evaluators(content, target, context=context)
+
+
+def _fetch_session_messages(session_id: str) -> List[Dict[str, Any]]:
+    """Fetch messages for a session from state.db, reusing fetch_sessions' query pattern.
+
+    Returns a list of dicts with keys: role, content, tool_calls, timestamp.
+    """
+    import sqlite3
+    from fetch_sessions import get_state_db_path
+
+    db_path = get_state_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            "SELECT role, content, tool_calls, timestamp FROM messages "
+            "WHERE session_id = ? ORDER BY timestamp ASC",
+            (session_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def evaluate_tool_calls(session_id_or_messages: Any) -> List[EvalResult]:
+    """Evaluate the tool-call quality of a session that produced a proposal.
+
+    This is a fast-follow target (R5) that reuses the same evaluator registry and
+    provider layer as evaluate_skill_text(). Input can be a session_id (str) to
+    query state.db directly, or a list of message dicts (for testing without DB).
+    """
+    # Resolve input to a list of message dicts
+    if isinstance(session_id_or_messages, str):
+        session_id = session_id_or_messages
+        messages = _fetch_session_messages(session_id)
+    else:
+        # Assume it's an iterable of message dicts (for testing)
+        messages = list(session_id_or_messages)
+        # Try to extract session_id from first message if present
+        session_id = messages[0].get("session_id", "unknown-session") if messages else "unknown-session"
+
+    # Extract tool_calls from messages
+    tool_calls_list = []
+    total_chars = 0
+    MAX_TOTAL_CHARS = 5000  # ~5KB cap so one evaluation costs ~same as skill-text
+    for msg in messages:
+        tc = msg.get("tool_calls")
+        if not tc:
+            continue
+        # tc could be a JSON string or already a list
+        if isinstance(tc, str):
+            try:
+                tc = json.loads(tc)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(tc, list):
+            for call in tc:
+                # Each call: {name, arguments, result}
+                # Cap result snippet at 200 chars
+                result = call.get("result", "")
+                if isinstance(result, str) and len(result) > 200:
+                    result = result[:200] + "..."
+                call_snippet = {
+                    "name": call.get("name", ""),
+                    "arguments": call.get("arguments", {}),
+                    "result": result,
+                }
+                snippet_text = json.dumps(call_snippet)
+                if total_chars + len(snippet_text) > MAX_TOTAL_CHARS:
+                    break
+                tool_calls_list.append(call_snippet)
+                total_chars += len(snippet_text)
+
+    target = f"tool_calls:{session_id}"
+
+    if not tool_calls_list:
+        # No tool calls to evaluate — return a passing "no data" result so history
+        # exists but doesn't penalize. RegressionEvaluator will have a baseline.
+        context = {"content_kind": "tool_calls"}
+        return run_evaluators(
+            "(no tool calls recorded in this session)",
+            target,
+            context=context,
+        )
+
+    content = json.dumps(tool_calls_list, indent=2)
+    content_kind = "tool_calls"
+    context = {"content_kind": content_kind}
+
+    return run_evaluators(content, target, context=context)
+
+
+def _fetch_proposal_markdown(proposal_id: str) -> Optional[str]:
+    """Fetch a saved proposal's markdown content from disk."""
+    import proposal as proposal_module
+    proposals_dir = proposal_module.get_proposals_dir()
+    # Proposals are saved as <id>.md
+    for fname in os.listdir(proposals_dir):
+        if fname.startswith(proposal_id) and fname.endswith(".md"):
+            path = os.path.join(proposals_dir, fname)
+            try:
+                with open(path) as f:
+                    return f.read()
+            except OSError:
+                return None
+    return None
+
+
+def evaluate_analyzer_prompt(session_id: str, proposal_id: str) -> List[EvalResult]:
+    """Evaluate the analyzer's generation step — did it produce a grounded proposal?
+
+    This is a fast-follow target (R5) that reuses the same evaluator registry and
+    provider layer as evaluate_skill_text(). Given a session_id and proposal_id,
+    it reads the session messages and the saved proposal, then asks the judge to
+    rate relevance, specificity, and evidence grounding.
+    """
+    # Fetch session messages
+    messages = _fetch_session_messages(session_id)
+
+    # Truncate messages to first 300 chars each, total cap 10KB
+    MAX_SESSION_CHARS = 10000
+    session_parts = []
+    total_chars = 0
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if len(content) > 300:
+            content = content[:300] + "..."
+        snippet = f"[{role}] {content}"
+        if total_chars + len(snippet) > MAX_SESSION_CHARS:
+            break
+        session_parts.append(snippet)
+        total_chars += len(snippet)
+
+    session_text = "\n".join(session_parts) if session_parts else "(no messages)"
+
+    # Fetch proposal markdown
+    proposal_text = _fetch_proposal_markdown(proposal_id) or "(proposal not found)"
+
+    target = f"analyzer_prompt:{session_id}"
+
+    content = f"[SESSION MESSAGES]\n{session_text}\n\n[PROPOSAL]\n{proposal_text}"
+    content_kind = "analyzer_prompt"
+    context = {"content_kind": content_kind}
 
     return run_evaluators(content, target, context=context)
 
@@ -1205,6 +1393,11 @@ def main():
     parser.add_argument("--since", type=str, default=None, help="Only re-evaluate proposals created at/after this ISO date")
     parser.add_argument("--dry-run", action="store_true", help="With --retroactive, report what would run without appending history")
     parser.add_argument("--prune", action="store_true", help="Prune history per SKILL_EVOLUTION_HISTORY_RETENTION and exit")
+    # New: one-off evaluation of any of the four targets
+    parser.add_argument("--eval-target", choices=["skill", "proposal", "tool_calls", "analyzer_prompt"],
+                        default="skill", help="Which target to evaluate (default: skill)")
+    parser.add_argument("--proposal-id", type=str, default=None, help="Proposal ID for proposal/analyzer_prompt targets")
+    parser.add_argument("--session-id", type=str, default=None, help="Session ID for tool_calls/analyzer_prompt targets")
     args = parser.parse_args()
 
     if args.prune:
@@ -1225,6 +1418,77 @@ def main():
             sys.exit(1)
         for ev in evaluators:
             print(ev.name)
+
+    # New: one-off evaluation of any target (independent of --retroactive)
+    if args.eval_target != "skill":
+        if args.eval_target == "proposal":
+            if not args.proposal_id:
+                print("--eval-target proposal requires --proposal-id", file=sys.stderr)
+                sys.exit(1)
+            # Load the proposal and evaluate it
+            import proposal as proposal_module
+            p = proposal_module.load_proposal(args.proposal_id)
+            if not p:
+                print(f"Proposal not found: {args.proposal_id}", file=sys.stderr)
+                sys.exit(1)
+            results = evaluate_proposal(p)
+            for r in results:
+                print(f"{r.evaluator_name}: score={r.score:.2f} passed={r.passed} feedback={r.feedback}")
+            # Also write to history
+            append_history(
+                f"proposal:{args.proposal_id}",
+                EvalResult(
+                    score=sum(r.score for r in results) / len(results) if results else 0,
+                    passed=all(r.passed for r in results),
+                    evaluator_name="gate",
+                    feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
+                ),
+                content_size=len(json.dumps([getattr(p, 'summary', ''), getattr(p, 'rationale', '')]).encode("utf-8")),
+            )
+            print(f"History entry written for proposal:{args.proposal_id}")
+            return
+
+        elif args.eval_target == "tool_calls":
+            if not args.session_id:
+                print("--eval-target tool_calls requires --session-id", file=sys.stderr)
+                sys.exit(1)
+            results = evaluate_tool_calls(args.session_id)
+            for r in results:
+                print(f"{r.evaluator_name}: score={r.score:.2f} passed={r.passed} feedback={r.feedback}")
+            # Also write to history
+            append_history(
+                f"tool_calls:{args.session_id}",
+                EvalResult(
+                    score=sum(r.score for r in results) / len(results) if results else 0,
+                    passed=all(r.passed for r in results),
+                    evaluator_name="gate",
+                    feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
+                ),
+                content_size=len(json.dumps(["tool_calls"]).encode("utf-8")),
+            )
+            print(f"History entry written for tool_calls:{args.session_id}")
+            return
+
+        elif args.eval_target == "analyzer_prompt":
+            if not args.session_id or not args.proposal_id:
+                print("--eval-target analyzer_prompt requires --session-id and --proposal-id", file=sys.stderr)
+                sys.exit(1)
+            results = evaluate_analyzer_prompt(args.session_id, args.proposal_id)
+            for r in results:
+                print(f"{r.evaluator_name}: score={r.score:.2f} passed={r.passed} feedback={r.feedback}")
+            # Also write to history
+            append_history(
+                f"analyzer_prompt:{args.session_id}",
+                EvalResult(
+                    score=sum(r.score for r in results) / len(results) if results else 0,
+                    passed=all(r.passed for r in results),
+                    evaluator_name="gate",
+                    feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
+                ),
+                content_size=len(json.dumps([args.session_id, args.proposal_id]).encode("utf-8")),
+            )
+            print(f"History entry written for analyzer_prompt:{args.session_id}")
+            return
 
     if args.retroactive:
         try:

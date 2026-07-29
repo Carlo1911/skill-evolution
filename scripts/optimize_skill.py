@@ -19,6 +19,7 @@ Usage:
 import argparse
 import functools
 import os
+import re
 import secrets
 import sys
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -89,8 +90,15 @@ def is_enabled() -> bool:
 
 
 def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
-                              history_path: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return each target's most recent history entry when it scores below `threshold`."""
+                              history_path: Optional[str] = None,
+                              target_namespace: Optional[str] = "skill") -> List[Dict[str, Any]]:
+    """Return each target's most recent history entry when it scores below `threshold`.
+
+    `target_namespace` filters to targets with the given prefix:
+    - "skill" (default): only targets starting with "skill:"
+    - "all": no filtering (includes proposal:, tool_calls:, analyzer_prompt:)
+    - any other string: exact prefix match (e.g. "proposal:" to get only proposals)
+    """
     import evaluate
 
     entries = evaluate._read_all_entries(history_path or evaluate.get_history_path())
@@ -98,9 +106,16 @@ def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
     for entry in entries:
         latest_by_target[entry.get("target", "")] = entry  # entries are chronological; last wins
 
+    def matches_namespace(target: str) -> bool:
+        if target_namespace is None or target_namespace == "all":
+            return True
+        return target.startswith(target_namespace + ":") if target_namespace else False
+
     return [
         entry for entry in latest_by_target.values()
-        if entry.get("score", 1.0) < threshold and entry.get("feedback")
+        if matches_namespace(entry.get("target", ""))
+        and entry.get("score", 1.0) < threshold
+        and entry.get("feedback")
     ]
 
 
@@ -482,6 +497,35 @@ def _build_objective(seed_body: str, skill_name: str) -> str:
     )
 
 
+def _structural_comparison(winner_text: str, candidate_text: str) -> str:
+    """Describe qualitative structural differences between two candidate bodies.
+
+    Compares byte size and heading structure to explain *what trade-off* a
+    non-winning candidate made relative to the winner (R9), without any extra
+    provider calls.  Returns a short human-readable phrase.
+    """
+    w_bytes = len(winner_text.encode("utf-8"))
+    c_bytes = len(candidate_text.encode("utf-8"))
+
+    parts: List[str] = []
+
+    if c_bytes != w_bytes:
+        pct = (c_bytes - w_bytes) / w_bytes * 100
+        if abs(pct) >= 1:
+            direction = "larger" if pct > 0 else "smaller"
+            parts.append(f"{abs(pct):.0f}% {direction} ({c_bytes}B vs {w_bytes}B)")
+
+    w_heads = len(re.findall(r"^#{1,3}\s+\S", winner_text, re.MULTILINE))
+    c_heads = len(re.findall(r"^#{1,3}\s+\S", candidate_text, re.MULTILINE))
+    if c_heads != w_heads:
+        diff = c_heads - w_heads
+        parts.append(f"{diff:+d} headings" if diff else "")
+
+    if not parts:
+        return "structurally similar to the winner"
+    return "; ".join(parts)
+
+
 def _winner_score(result) -> float:
     """Return the winning candidate's score from a gepa.GEPAResult-shaped object."""
     return result.val_aggregate_scores[result.best_idx]
@@ -567,9 +611,10 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     The proposal's `body` change is the winning candidate text verbatim (result.best_candidate),
     not a placeholder. The rationale reports how many candidates GEPA explored, the
     seed-to-winner score delta (R6: "score improved from 0.72 to 0.81"), and the
-    runner-up's score (the second-highest score in val_aggregate_scores, excluding the
-    winner's own index) as a trade-off note (R9) -- unless only one candidate was
-    explored, in which case it says so instead of erroring.
+    runner-up's score plus a qualitative structural description of the trade-off
+    the runner-up made (R9) -- unless only one candidate was explored, in which
+    case it says so instead of erroring.  The qualitative comparison (byte size,
+    heading count) comes from `result.candidates` so it needs no extra provider call.
     """
     import evaluate
     import proposal as proposal_module
@@ -598,13 +643,24 @@ def draft_proposal_from_gepa_result(skill_name: str, result):
     winner_score = _winner_score(result)
     seed_score = _seed_score(result)
 
-    other_scores = [s for i, s in enumerate(scores) if i != result.best_idx]
+    other_scores = [(i, s) for i, s in enumerate(scores) if i != result.best_idx]
     if other_scores:
-        runner_up_score = max(other_scores)
+        runner_up_idx, runner_up_score = max(other_scores, key=lambda x: x[1])
+        trade_off = ""
+        try:
+            candidate_key = getattr(result, "_str_candidate_key", "_string")
+            runner_up_body = result.candidates[runner_up_idx].get(candidate_key, "")
+            if runner_up_body:
+                trade_off = _structural_comparison(result.best_candidate, runner_up_body)
+        except (IndexError, KeyError, TypeError, AttributeError):
+            pass
         comparison = (
             f"the runner-up candidate scored {runner_up_score:.3f} "
-            f"(a {winner_score - runner_up_score:+.3f} margin over the winner)."
+            f"(a {winner_score - runner_up_score:+.3f} margin over the winner)"
         )
+        if trade_off:
+            comparison += f", and was {trade_off}"
+        comparison += "."
     else:
         comparison = "no runner-up exists -- only one candidate was explored."
 
@@ -696,10 +752,14 @@ def main():
         "--list-candidates", action="store_true",
         help="Print low-scoring targets from evaluation history and exit (read-only, no optimization run)",
     )
+    parser.add_argument(
+        "--target", choices=["skill", "all"], default="skill",
+        help="Filter --list-candidates by target namespace: 'skill' (default) or 'all'",
+    )
     args = parser.parse_args()
 
     if args.list_candidates:
-        _print_candidates(find_low_scoring_targets())
+        _print_candidates(find_low_scoring_targets(target_namespace=args.target))
         return
 
     if args.skill:

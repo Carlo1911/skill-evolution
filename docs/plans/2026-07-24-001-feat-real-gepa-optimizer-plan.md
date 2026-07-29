@@ -344,7 +344,7 @@ run_gepa_optimization(skill_name, iterations=None):
 
 **Test scenarios:**
 - Happy path: the proposal's `proposed_changes[0].new_value` is the optimized candidate text, not a placeholder string.
-- Happy path (Covers R9): the rationale names the number of candidates explored and the winning vs. runner-up score.
+- Happy path (Covers R9): the rationale names the number of candidates explored, both scores, and a qualitative description of the runner-up's trade-off (byte size, heading count).
 - Regression (Covers AE3): an optimizer-produced proposal still passes through `apply_proposal()`'s evaluation gate with no bypass — same invariant as today's `test_optimizer_proposal_goes_through_same_gate_no_bypass`.
 
 **Verification:** A fixture result object with 3+ candidates produces a proposal whose rationale text distinguishes the winner from at least one runner-up.
