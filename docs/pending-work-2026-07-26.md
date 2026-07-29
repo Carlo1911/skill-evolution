@@ -12,9 +12,11 @@ than restating it, so the two do not drift. (Three divergent copies of
 `fetch_sessions.py` are what caused P0-1 below; duplicating prose is the same failure mode
 in a cheaper form.)
 
-Test baseline: **450 passed** with `gepa` installed, **446 passed + 1 skipped** without
-(was 253/249 when this document was first written, 351/347 after the P0/P1 items, and
-443/439 before the provider-timeout knob added its 7 on 2026-07-27).
+Test baseline: **511 passed** with `gepa` installed, **507 passed + 1 skipped** without
+(was 253/249 when this document was first written, 351/347 after the P0/P1 items,
+443/439 before the provider-timeout knob added its 7 on 2026-07-27, and 450/446+1 before
+the first-party OpenAI/Gemini provider expansion and its review-fix pass added 61 more on
+2026-07-28).
 
 ---
 
