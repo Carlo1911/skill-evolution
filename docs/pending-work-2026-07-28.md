@@ -23,6 +23,105 @@ Verified state at the time of writing:
 This is a **decision inventory, not a committed roadmap.** Pick an item, then run it through
 `ce-brainstorm`/`ce-plan` before building.
 
+> **Amended 2026-07-29.** Reviewing the first two proposals the live cron produced turned up
+> four defects in shipped code that no test caught, because every test for the affected paths
+> injects its inputs instead of exercising them. The "no known P0" line above was written on
+> 2026-07-28 and is **no longer true** — see P0-1 through P0-4. Two of them make claims this
+> repo's own documentation had already recorded as working.
+
+---
+
+## P0 — Shipped code that does not work
+
+All four were found by running the documented commands against the real tree on 2026-07-29,
+not by reading. Each is small; the pattern connecting them is that the affected paths are
+exercised in tests only through injected inputs.
+
+### P0-1. `evaluate_tool_calls(session_id)` and `evaluate_analyzer_prompt()` raise `ImportError`
+
+`_fetch_session_messages()` does `from fetch_sessions import get_state_db_path` —
+**a function that does not exist.** `fetch_sessions.py` defines `get_state_file()` (the JSON
+state path) and `DEFAULT_DB_PATH`, never `get_state_db_path()`. Every call that reaches the
+DB dies:
+
+```
+ImportError: cannot import name 'get_state_db_path' from 'fetch_sessions'
+```
+
+So two of the three evaluation targets that shipped 2026-07-27 have never worked against a
+real session. Their tests pass because they take the documented list-of-messages input
+instead of a session id — the injection path — leaving the DB branch unexecuted. This is
+exactly the blind spot `CLAUDE.md` warns about for stubbed dependencies, in a new place.
+
+Fix: add `get_state_db_path()` to `fetch_sessions.py` (honouring an env override, the way
+`get_state_file()` does) and a test that calls `evaluate_tool_calls()` with a session id
+against a fixture DB.
+
+### P0-2. `--eval-target proposal --proposal-id <id>` crashes on the id its help text asks for
+
+`proposal.load_proposal()` takes a **path**; the CLI passes `args.proposal_id` straight into
+it, so a bare id raises `FileNotFoundError`. The guard immediately below —
+`if not p: print("Proposal not found: ...")` — can never fire, because `load_proposal()`
+raises rather than returning `None`.
+
+Passing a path "works" but is worse than it looks: the history key becomes
+`proposal:docs/skill-evolution/proposals/20260729-001.md`, so a filesystem path lands in the
+target namespace that `RegressionEvaluator` and `find_low_scoring_targets()` both key on.
+
+Fix: resolve the id against `get_proposals_dir()` before loading, and either catch
+`FileNotFoundError` or give `load_proposal()` a `None`-returning sibling so the existing
+guard means something.
+
+### P0-3. The deterministic size guards silently no-op on real analyzer output
+
+**This is the consequential one.** `_extract_evaluated_content()` returns the first
+`proposed_changes` entry whose field is `body` or `description` **and whose `new_value` is
+truthy**; failing that it falls back to `(summary + rationale, "summary_rationale", None)`.
+Both proposals the cron produced on 2026-07-29 hit that fallback, and the gate passed both:
+
+| Proposal | What the gate scored | What it would actually change |
+|---|---|---|
+| `20260729-001` | 63 bytes of summary text, `content_kind=summary_rationale` | +~500 B on a **19,018-byte** installed skill — already 3.6 KB over the 15 KB cap |
+| `20260729-002` | 238 bytes of `description` | a new skill whose `body` `new_value` is the literal placeholder `"See proposal body for full draft content"` |
+
+Because `content_kind` is not `body`, the frontmatter check is skipped; because
+`_resolve_baseline()` only resolves for body changes, `baseline_size` is `None` and **every
+growth, shrink, byte-floor and cumulative check is inert.** The ratchet — the guard whose
+entire purpose is to stop an already-oversized skill from growing — never ran on a proposal
+that grows an already-oversized skill.
+
+Two independent causes, both needing a fix:
+
+1. **The analyzer does not populate `new_value` for body changes.** The prompt asks for it
+   (`session-analyzer-prompt.md:80`), the model wrote prose in the markdown body instead, and
+   nothing validates the structured field. A proposal whose body change carries no `new_value`
+   is not evaluable as a body change and should be **rejected as malformed**, not silently
+   downgraded to scoring its own summary.
+2. **The fallback is too quiet and order-dependent.** It exists for `merge_skills`, which
+   genuinely has no single body field — but it currently also absorbs a *broken*
+   `improve_existing`. And because the scan returns the first match, a `create_new` proposal
+   listing `description` before `body` gets its description scored and its body never looked
+   at (`20260729-002` exactly).
+
+Fix: reject a body/description change with an empty `new_value` rather than falling through;
+prefer `body` over `description` when both are present; keep the `summary_rationale` fallback
+scoped to proposal types that legitimately lack a body field. Add a test asserting a
+`new_value`-less `improve_existing` fails the gate.
+
+### P0-4. Both live proposals are unapplicable as written
+
+Downstream of P0-3, and worth stating separately because it is what a reviewer actually hits:
+
+- **`20260729-001`** — sound, well-evidenced analysis (a real recurring cron failure,
+  corroborated by persistent memory), but carries **no `new_value`**, so there is no machine-
+  applicable change: `apply_proposal()` would emit a `patch` instruction with nothing to
+  patch. It also targets a skill 3.6 KB over the cap, so once P0-3 is fixed the ratchet will
+  correctly reject it until the skill is split.
+- **`20260729-002`** — its `body` `new_value` is a placeholder string. Applying it would
+  create a skill whose entire body reads `See proposal body for full draft content`.
+
+Neither is a *reasoning* failure; both are the structured-field/prose mismatch in P0-3.
+
 ---
 
 ## P1 — Blocks distribution or leaves a shipped feature unproven
@@ -228,6 +327,10 @@ review:
 
 ## Recommended order
 
+0. **P0-3 first** — the size guards not running on real analyzer output makes the gate's
+   headline safety property theatre, and it is a small fix. Then P0-1 and P0-2, which are
+   each a few lines. P0-4 resolves itself once P0-3 is fixed and the two proposals are
+   redone with real `new_value` content.
 1. **P1-1** (git remote) — one owner decision, unblocks publication entirely.
 2. **P1-2** (live-verify the two new providers) — cheap, and it is the only thing standing
    between "shipped" and "proven" for work already merged.

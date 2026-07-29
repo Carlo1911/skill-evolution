@@ -209,6 +209,10 @@ python3 scripts/evaluate.py --retroactive              # re-evaluate and append 
 python3 scripts/evaluate.py --prune                    # prune history per the retention var
 
 # --- The three observability-only targets (never gate auto-apply) ---
+# WARNING: all three are broken as of 2026-07-29 and are shown here as the intended
+# interface, not a working one. `proposal` needs a file path rather than the id its help
+# advertises; `tool_calls` and `analyzer_prompt` raise ImportError on a missing helper.
+# Only `--eval-target skill` (the default) works today.
 # `deterministic` is meaningless for these, so opt out of it:
 SKILL_EVOLUTION_EVALUATORS=llm_judge,regression \
   python3 scripts/evaluate.py --eval-target proposal --proposal-id <id>

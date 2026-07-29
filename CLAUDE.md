@@ -34,7 +34,12 @@ python3 scripts/evaluate.py --retroactive                 # re-run evaluation ag
 python3 scripts/evaluate.py --prune                       # prune eval history per SKILL_EVOLUTION_HISTORY_RETENTION
 
 # The three non-skill-text evaluation targets (observability-only — these never gate auto-apply).
-# `deterministic` is meaningless for them, so opt out of it:
+# `deterministic` is meaningless for them, so opt out of it.
+# ⚠ ALL THREE ARE CURRENTLY BROKEN — verified 2026-07-29, see pending-work-2026-07-28.md P0-1/P0-2.
+#   `--eval-target proposal` needs a *path*, not the id its help text advertises (a bare id
+#   raises FileNotFoundError; a path works but writes a path-shaped history key).
+#   `tool_calls`/`analyzer_prompt` raise ImportError — `fetch_sessions.get_state_db_path()`
+#   was never written. Only `--eval-target skill` (the default) works.
 SKILL_EVOLUTION_EVALUATORS=llm_judge,regression python3 scripts/evaluate.py --eval-target proposal        --proposal-id <id>
 SKILL_EVOLUTION_EVALUATORS=llm_judge,regression python3 scripts/evaluate.py --eval-target tool_calls      --session-id <id>
 SKILL_EVOLUTION_EVALUATORS=llm_judge,regression python3 scripts/evaluate.py --eval-target analyzer_prompt --session-id <id> --proposal-id <id>
