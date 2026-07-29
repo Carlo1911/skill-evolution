@@ -24,6 +24,7 @@ DEFAULT_DB_PATH = os.path.expanduser("~/.hermes/state.db")
 STATE_FILE = os.path.expanduser("~/.hermes/skill_evolution_state.json")
 STATE_FILE_ENV_VAR = "SKILL_EVOLUTION_STATE_FILE"
 STATE_RETENTION_ENV_VAR = "SKILL_EVOLUTION_STATE_RETENTION"
+DB_PATH_ENV_VAR = "SKILL_EVOLUTION_DB_PATH"
 
 # ── Secret patterns — NEVER include these in datasets ──────────────────
 SECRET_PATTERNS = [
@@ -207,6 +208,24 @@ def get_state_file() -> str:
     over both modules to catch drift. Change one, change the other.
     """
     return os.environ.get(STATE_FILE_ENV_VAR, "").strip() or STATE_FILE
+
+
+def get_state_db_path() -> str:
+    """Resolve the session database, honouring SKILL_EVOLUTION_DB_PATH.
+
+    Deliberately the same shape as get_state_file() above -- env read at call time, blank
+    ignored, fallback to the module global rather than the literal path so monkeypatching
+    DEFAULT_DB_PATH keeps working.
+
+    This existed only as an import in evaluate._fetch_session_messages() until 2026-07-29,
+    which meant evaluate_tool_calls(session_id) and evaluate_analyzer_prompt() raised
+    ImportError on every call that reached the DB. Their tests all passed message lists
+    instead of session ids, so nothing exercised the branch. Note the asymmetry with
+    fetch_sessions()/sessions_for_skill(), which take `db_path` as an argument defaulting to
+    DEFAULT_DB_PATH: those are called from a CLI that owns a --db-path flag, while the
+    evaluation targets are called in-process with no path to thread through.
+    """
+    return os.environ.get(DB_PATH_ENV_VAR, "").strip() or DEFAULT_DB_PATH
 
 
 def _read_state() -> Optional[Dict[str, Any]]:

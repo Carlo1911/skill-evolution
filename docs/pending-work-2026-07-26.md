@@ -430,7 +430,7 @@ Renumbered from `pending-work.md`, statuses re-verified against code.
 | 5 | ~~**Production cron**~~ | **Closed** — superseded by P0-1 and done. The cron already pointed here; its *scripts* now do too. |
 | 6 | **Heavier evaluation techniques** — pairwise/win-rate, debate/ensemble, execution re-run, embedding similarity, fine-tuned judges | **Not started**, deliberately deferred. Not reconsidered. |
 | 7 | **Host-agnostic / multi-agent support** (Codex, Claude Code, …) | **Mapped, not started.** Four coupling seams, each isolated in one module. Owner's principle: the more agnostic, the better. Read side generalizes cheaply; the write side needs a per-host apply strategy since no host outside Hermes exposes `skill_manage`. |
-| 8 | **Community-skill publication** (integration-plan Fase 4) | **Unblocked, one step left.** Its three doc prerequisites (P2-1/P2-2/P2-3) are done, and Fase 4's "self-contained, no ai-memory-stack dependency" was satisfied by P0-1. What remains is **a git remote** — the repo has none, so nothing can be installed from a URL. That is an owner decision (where to host, public or private). |
+| 8 | **Community-skill publication** (integration-plan Fase 4) | **Remote added 2026-07-29** (`Carlo1911/skill-evolution`); first push + making the repo public are what remain. Original note follows. **Unblocked, one step left.** Its three doc prerequisites (P2-1/P2-2/P2-3) are done, and Fase 4's "self-contained, no ai-memory-stack dependency" was satisfied by P0-1. What remains is **a git remote** — the repo has none, so nothing can be installed from a URL. That is an owner decision (where to host, public or private). |
 
 ### Smaller open items (11)
 

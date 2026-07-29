@@ -31,13 +31,24 @@ This is a **decision inventory, not a committed roadmap.** Pick an item, then ru
 
 ---
 
-## P0 — Shipped code that does not work
+## P0 — Shipped code that did not work — ALL RESOLVED 2026-07-29
 
-All four were found by running the documented commands against the real tree on 2026-07-29,
-not by reading. Each is small; the pattern connecting them is that the affected paths are
-exercised in tests only through injected inputs.
+Found by running the documented commands against the real tree, not by reading. **A fifth
+defect (P0-5) surfaced only because fixing P0-1 made the broken path reachable** — the DB
+read started working and immediately proved the extraction downstream of it was reading a
+shape no real row uses.
 
-### P0-1. `evaluate_tool_calls(session_id)` and `evaluate_analyzer_prompt()` raise `ImportError`
+The pattern connecting all five: every affected path is exercised in tests only through
+*injected* inputs, in shapes that documentation described but production never produced. Test
+suite went 507 → 533.
+
+### ~~P0-1. `evaluate_tool_calls(session_id)` and `evaluate_analyzer_prompt()` raise `ImportError`~~ — RESOLVED
+
+**Fix:** `fetch_sessions.get_state_db_path()` added, shaped exactly like the existing
+`get_state_file()` — env read at call time via the new `SKILL_EVOLUTION_DB_PATH`, blank
+ignored, fallback to the module global so monkeypatching `DEFAULT_DB_PATH` still works.
+Covered by `tests/test_evaluate_session_db_path.py`, which exercises the DB branch itself
+rather than the injection path that hid the bug.
 
 `_fetch_session_messages()` does `from fetch_sessions import get_state_db_path` —
 **a function that does not exist.** `fetch_sessions.py` defines `get_state_file()` (the JSON
@@ -57,7 +68,15 @@ Fix: add `get_state_db_path()` to `fetch_sessions.py` (honouring an env override
 `get_state_file()` does) and a test that calls `evaluate_tool_calls()` with a session id
 against a fixture DB.
 
-### P0-2. `--eval-target proposal --proposal-id <id>` crashes on the id its help text asks for
+### ~~P0-2. `--eval-target proposal --proposal-id <id>` crashes on the id its help text asks for~~ — RESOLVED
+
+**Fix:** `_load_proposal_by_id_or_path()` tries the argument as given, then resolves it
+against `get_proposals_dir()` (appending `.md`), and the history key now comes from
+`p.proposal_id` rather than the CLI argument — so a path can no longer land in the target
+namespace. The first implementation pre-checked with `os.path.isfile()` and broke
+`tests/test_evaluate_cli.py`, which stubs `load_proposal`; attempting the load first is both
+simpler and keeps that seam testable. Covered by
+`tests/test_evaluate_proposal_id_resolution.py`.
 
 `proposal.load_proposal()` takes a **path**; the CLI passes `args.proposal_id` straight into
 it, so a bare id raises `FileNotFoundError`. The guard immediately below —
@@ -72,7 +91,23 @@ Fix: resolve the id against `get_proposals_dir()` before loading, and either cat
 `FileNotFoundError` or give `load_proposal()` a `None`-returning sibling so the existing
 guard means something.
 
-### P0-3. The deterministic size guards silently no-op on real analyzer output
+### ~~P0-3. The deterministic size guards silently no-op on real analyzer output~~ — RESOLVED
+
+**Fix:** `_extract_evaluated_content()` now selects by *kind* rather than list position
+(`body` beats `description`, so a `create_new` listing them in the other order no longer has
+its body ignored), and returns `MALFORMED_CONTENT_KIND` when a body/description change carries
+no `new_value` instead of falling through to the summary. `evaluate_skill_text()` short-circuits
+on that with a failing `structure` result — fail closed, and no provider call spent scoring
+prose that is not the proposed change. The `summary_rationale` fallback stays scoped to
+`merge_skills`/`deprecate_skill`, which genuinely have no body field.
+
+**A second-order hazard was found while fixing this, not by the review:**
+`evaluate_and_record()` persists `content_size`, and `original_size_for_target()` reads the
+earliest one back as the cumulative-drift baseline — so recording the ~110-byte error message
+would have become "where this skill started", making any later real body read as
+several-thousand-percent growth. A malformed proposal now records no sizes at all. Covered by
+`tests/test_evaluate_malformed_changes.py` and `tests/test_evaluate_malformed_history.py`,
+including an end-to-end test that the ratchet now actually rejects growth on an oversized skill.
 
 **This is the consequential one.** `_extract_evaluated_content()` returns the first
 `proposed_changes` entry whose field is `body` or `description` **and whose `new_value` is
@@ -122,22 +157,68 @@ Downstream of P0-3, and worth stating separately because it is what a reviewer a
 
 Neither is a *reasoning* failure; both are the structured-field/prose mismatch in P0-3.
 
+**Status:** the gate now rejects both correctly, so they are no longer a *safety* problem —
+but they are still **unapplied and unapplicable**, and that is the open part. `20260729-001`'s
+analysis is worth keeping: to act on it, the body change needs real `new_value` text, and its
+target skill (19,018 B, 3.6 KB over the cap) needs splitting by hand first, since the ratchet
+correctly refuses to let an oversized skill grow. `20260729-002` needs its placeholder body
+replaced with the draft that currently lives only in the proposal's prose.
+
+### ~~P0-5. `evaluate_tool_calls()` extracted nothing from real sessions~~ — RESOLVED
+
+**Only visible once P0-1 was fixed.** With the DB path working, a real 281-message session
+(133 of them carrying tool calls) produced 137 snippets that were *all* empty —
+`{"name": "", "arguments": {}, "result": ""}` — and handed the judge **14 bytes**.
+
+Hermes stores OpenAI function-call objects, where the name and arguments are nested under
+`function` and `arguments` is itself a JSON string:
+
+```json
+{"id": "call_00_...", "type": "function",
+ "function": {"name": "cronjob", "arguments": "{\"action\": \"list\"}"}}
+```
+
+The extraction read `call["name"]` and `call["arguments"]` at the top level — the *flat* shape
+the tests inject and no real row uses. So the target read the DB and scored nothing, which is
+worse than failing: it wrote `passed: true` history entries carrying no signal.
+
+**Fix:** `_normalize_tool_call()` handles both shapes, decodes string-encoded `arguments` so
+the judge sees a real object rather than escaped noise, and returns `None` for a call with no
+recoverable name — padding the payload with empty objects both faked coverage and consumed the
+5 KB budget. Verified against the same real session: **14 bytes → 6,069 bytes**, with
+`cronjob`, `read_file`, `search_files`, `terminal`, `tool_search` all present. Covered by
+`tests/test_evaluate_tool_calls_real_shape.py`.
+
+**The generalizable lesson**, worth carrying into the host-agnostic work: a documented data
+shape is not evidence. `analyzer_prompt` reads the same messages and should be spot-checked
+against a real session before it is trusted.
+
 ---
 
 ## P1 — Blocks distribution or leaves a shipped feature unproven
 
-### P1-1. The repo still has no git remote
+### ~~P1-1. The repo still has no git remote~~ — RESOLVED 2026-07-29
 
-`git remote -v` returns nothing. This is the single remaining step of
-`integration-plan.md` Fase 4 ("SKILL.md publicado en GitHub"), and it blocks the install
-instructions in both `README.md` and `SKILL.md`, which currently tell the reader to
-substitute `<owner>` themselves and say plainly that no published remote exists.
+`origin` is now `git@github.com:Carlo1911/skill-evolution.git`, closing the last step of
+`integration-plan.md` Fase 4. The install URLs in `README.md` and `SKILL.md` carry the real
+path instead of an `<owner>` placeholder.
 
-Everything else Fase 4 asked for is done: scripts are self-contained (no `ai-memory-stack`
-dependency), the README is accurate, and the skill file is installable as written.
+**Mind the name mismatch:** the GitHub repo is `skill-evolution`, the local directory and the
+skill's own `name:` field are `hermes-skill-evolution`. The install URL must use the *repo*
+name; the skill keeps its own. `SKILL.md` says so inline, because getting this backwards
+yields a 404 that looks like a permissions problem.
 
-**This is an owner decision, not an engineering task** — where to host it, and whether it
-is public or private. Nothing can proceed on it without that call.
+Settled at the same time, since a permissive licence does not by itself preserve the author's
+future options: the `LICENSE` copyright and `SKILL.md`'s `author:` field said
+"Nous Research Community", attributing this work to an organisation that did not write it.
+Both now name the actual author. MIT stays — it is already declared in `LICENSE`,
+`pyproject.toml`, `README.md` and `SKILL.md`, and for a community skill maximum adoption is
+the point. The Nous credit remains where it is accurate: inspiration, in the README's About
+section.
+
+**Two things still gate an actual publication**, neither of them code:
+1. Nothing has been pushed yet — `origin` is configured, not populated.
+2. The repo must be **public** for `hermes skills install <raw-url>` to work for anyone else.
 
 ### P1-2. Neither new provider has been exercised against a live endpoint
 
@@ -327,13 +408,12 @@ review:
 
 ## Recommended order
 
-0. **P0-3 first** — the size guards not running on real analyzer output makes the gate's
-   headline safety property theatre, and it is a small fix. Then P0-1 and P0-2, which are
-   each a few lines. P0-4 resolves itself once P0-3 is fixed and the two proposals are
-   redone with real `new_value` content.
-1. **P1-1** (git remote) — one owner decision, unblocks publication entirely.
-2. **P1-2** (live-verify the two new providers) — cheap, and it is the only thing standing
-   between "shipped" and "proven" for work already merged.
+0. ~~**All five P0s**~~ — **done 2026-07-29.** Suite 507 → 533.
+1. ~~**P1-1** (git remote)~~ — **done 2026-07-29.** `origin` points at
+   `Carlo1911/skill-evolution`; a first push and making the repo public are what remain.
+2. **P1-2** (live-verify the two new providers) — now the top open item, and cheap: it is the
+   only thing standing between "shipped" and "proven" for work already merged. P0-5 is the
+   argument for doing it — a shape nobody exercised was wrong in production for two days.
 3. Then **P2-2** (host-agnostic), which is the highest stated owner interest. Start with the
    read side; the write side needs a per-host apply strategy and is the expensive half.
 4. **P2-1** (gate the new targets) whenever the owner wants to decide it — the code is

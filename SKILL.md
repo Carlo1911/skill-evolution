@@ -1,7 +1,7 @@
 ---
 name: hermes-skill-evolution
 description: "Autonomous skill improvement — analyze Hermes sessions, generate structured improvement proposals, and optionally auto-apply high-confidence changes to your skills"
-author: Nous Research Community
+author: Carlo Alva
 version: 1.0.0
 platforms: [macos, linux]
 metadata:
@@ -47,8 +47,8 @@ proposed_changes:
 ### 1. Install the Skill
 
 ```bash
-# Replace <owner> with the account hosting your fork; this repo has no published remote yet.
-hermes skills install https://raw.githubusercontent.com/<owner>/hermes-skill-evolution/main/SKILL.md
+# Note the repo is `skill-evolution`; the *skill* is `hermes-skill-evolution`.
+hermes skills install https://raw.githubusercontent.com/Carlo1911/skill-evolution/main/SKILL.md
 ```
 
 ### 2. Load and Run
@@ -259,6 +259,7 @@ python3 scripts/optimize_skill.py --skill <name> [--iterations N]
 | `SKILL_EVOLUTION_HISTORY_RETENTION` | unbounded | Max versions (bare int) or age (`90d`, `6mo`); always keeps up to 3 anchor entries per target (most recent, most recent passing, earliest); applies automatically after every evaluation, not just via `--prune` |
 | `SKILL_EVOLUTION_HISTORY_ARCHIVE_PATH` | sibling of the history file (`eval_history.archive.jsonl`) | Where entries pruned by the above are moved, not deleted |
 | `SKILL_EVOLUTION_PROPOSALS_DIR` | `docs/skill-evolution/proposals` | Where proposals are written |
+| `SKILL_EVOLUTION_DB_PATH` | `~/.hermes/state.db` | Session database the `tool_calls` / `analyzer_prompt` targets read. `fetch_sessions.py` takes `--db-path` instead; this covers the in-process callers that have no flag to thread a path through |
 | `SKILL_EVOLUTION_STATE_FILE` | `~/.hermes/skill_evolution_state.json` | Which sessions have already been analyzed; override to run against isolated state |
 | `SKILL_EVOLUTION_STATE_RETENTION` | unbounded | Max processed-session entries (bare int) or age (`90d`, `6mo`); flat-dict state shape only (see below); applies automatically, and via `fetch_sessions.py --prune-state` |
 | `SKILL_EVOLUTION_AUTO_APPLY` / `_MIN_CONFIDENCE` | `false` / `0.85` | Inputs to `apply_proposal()`; the analysis session never self-applies regardless |

@@ -1032,6 +1032,9 @@ def target_key_for_proposal(proposal: Any) -> str:
     return f"proposal:{proposal_id}"
 
 
+MALFORMED_CONTENT_KIND = "malformed"
+
+
 def _extract_evaluated_content(proposal: Any) -> Tuple[str, str, Optional[str]]:
     """Return (content, content_kind, baseline) for the text a proposal wants evaluated.
 
@@ -1039,12 +1042,50 @@ def _extract_evaluated_content(proposal: Any) -> Tuple[str, str, Optional[str]]:
     history are measured over exactly the text that was scored -- deriving them twice
     from the proposal shape would let the two drift apart.
 
-    Falls back to summary+rationale for proposal shapes with no single body/description
-    field (e.g. merge_skills) so nothing is silently skipped.
+    Three cases, in this order:
+
+    1. **A body or description change carrying `new_value`** -- scored as that kind.
+       `body` wins when both are present, because the body is the text that actually gets
+       written and it is the only kind the frontmatter and size guards apply to. Selecting
+       by *kind* rather than by list position matters: the scan used to return the first
+       match, so a create_new proposal listing `description` before `body` had its
+       description scored and its body never looked at.
+
+    2. **A body or description change with an empty or missing `new_value`** -- returned as
+       MALFORMED_CONTENT_KIND, not silently downgraded. This is the P0-3 defect: a proposal
+       describing its change in prose while leaving the structured field empty used to reach
+       case 3, where content_kind is not "body", so the frontmatter check is skipped and
+       _resolve_baseline() returns no baseline -- leaving every growth, shrink, byte-floor
+       and cumulative check inert. A real proposal (20260729-001) that grew an
+       already-3.6KB-over-cap skill passed the gate on 63 bytes of its own summary. Such a
+       change is also unapplicable: apply_proposal() would emit a `patch` with nothing to
+       patch. Rejecting is both the honest and the safe answer.
+
+    3. **No body or description change at all** -- falls back to summary+rationale, so
+       merge_skills and deprecate_skill (which genuinely have no such field) are scored on
+       something rather than skipped. This fallback is deliberately *not* a catch-all for
+       case 2.
     """
-    for change in getattr(proposal, "proposed_changes", []):
-        if getattr(change, "field", None) in ("body", "description") and getattr(change, "new_value", None):
-            return change.new_value, change.field, getattr(change, "old_value", None)
+    changes = getattr(proposal, "proposed_changes", [])
+    by_kind = {
+        change.field: change
+        for change in changes
+        if getattr(change, "field", None) in ("body", "description")
+    }
+
+    for kind in ("body", "description"):          # body wins; order-independent
+        change = by_kind.get(kind)
+        if change is None:
+            continue
+        new_value = getattr(change, "new_value", None)
+        if new_value:
+            return new_value, kind, getattr(change, "old_value", None)
+        return (
+            f"proposal declares a {kind!r} change but its new_value is empty, so there is "
+            f"no text to evaluate or apply",
+            MALFORMED_CONTENT_KIND,
+            None,
+        )
 
     summary = getattr(proposal, "summary", "")
     rationale = getattr(proposal, "rationale", "")
@@ -1114,6 +1155,20 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     """
     target = target_key_for_proposal(proposal)
     content, content_kind, baseline = _extract_evaluated_content(proposal)
+
+    # A change with an empty new_value has no text to score and nothing to apply, so no
+    # evaluator can say anything useful about it. Fail closed here rather than running the
+    # registry: sending a placeholder to the judge would spend a provider call to score
+    # prose that is not the proposed change, and the deterministic guards would silently go
+    # inert (see _extract_evaluated_content case 2). Returned as a result rather than raised
+    # so apply_proposal() and retroactive_reevaluate() get the ordinary failing-gate path.
+    if content_kind == MALFORMED_CONTENT_KIND:
+        return [EvalResult(
+            score=0.0,
+            feedback=f"malformed proposal: {content}",
+            passed=False,
+            evaluator_name="structure",
+        )]
 
     context = {"content_kind": content_kind}
     # DeterministicEvaluator's growth-vs-baseline guard is inert unless it gets
@@ -1196,6 +1251,54 @@ def _fetch_session_messages(session_id: str) -> List[Dict[str, Any]]:
         conn.close()
 
 
+TOOL_CALL_RESULT_SNIPPET_CHARS = 200
+
+
+def _normalize_tool_call(call: Any) -> Optional[Dict[str, Any]]:
+    """Reduce one recorded tool call to {name, arguments, result}, or None if unusable.
+
+    Two shapes reach here and only one was handled before 2026-07-29:
+
+    - **Nested (what Hermes actually stores):** an OpenAI function-call object,
+      ``{"id", "call_id", "type": "function", "function": {"name", "arguments"}}``, where
+      `arguments` is itself a JSON *string* and there is no `result` key at all.
+    - **Flat (what the tests inject, and what another host might provide):**
+      ``{"name", "arguments", "result"}``.
+
+    Reading only the flat shape meant every snippet from a real session came out as
+    ``{"name": "", "arguments": {}, "result": ""}`` -- a real 281-message session produced
+    137 such blanks and handed the judge 14 bytes. Returning None for a call with no
+    recoverable name matters for the same reason: padding the payload with empty objects made
+    the target look populated while carrying no signal, and it consumed the 5KB budget.
+
+    `arguments` is decoded when it is a JSON string so the judge sees the actual argument
+    object rather than escaped noise.
+    """
+    if not isinstance(call, dict):
+        return None
+
+    function = call.get("function")
+    source = function if isinstance(function, dict) else call
+
+    name = source.get("name") or ""
+    if not name:
+        return None
+
+    arguments = source.get("arguments", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            pass  # keep the raw string; unparseable arguments are still evidence
+
+    # `result` lives on the outer object even in the nested shape, and is often absent.
+    result = call.get("result", source.get("result", ""))
+    if isinstance(result, str) and len(result) > TOOL_CALL_RESULT_SNIPPET_CHARS:
+        result = result[:TOOL_CALL_RESULT_SNIPPET_CHARS] + "..."
+
+    return {"name": name, "arguments": arguments, "result": result}
+
+
 def evaluate_tool_calls(session_id_or_messages: Any) -> List[EvalResult]:
     """Evaluate the tool-call quality of a session that produced a proposal.
 
@@ -1229,16 +1332,9 @@ def evaluate_tool_calls(session_id_or_messages: Any) -> List[EvalResult]:
                 continue
         if isinstance(tc, list):
             for call in tc:
-                # Each call: {name, arguments, result}
-                # Cap result snippet at 200 chars
-                result = call.get("result", "")
-                if isinstance(result, str) and len(result) > 200:
-                    result = result[:200] + "..."
-                call_snippet = {
-                    "name": call.get("name", ""),
-                    "arguments": call.get("arguments", {}),
-                    "result": result,
-                }
+                call_snippet = _normalize_tool_call(call)
+                if call_snippet is None:
+                    continue
                 snippet_text = json.dumps(call_snippet)
                 if total_chars + len(snippet_text) > MAX_TOTAL_CHARS:
                     break
@@ -1262,6 +1358,36 @@ def evaluate_tool_calls(session_id_or_messages: Any) -> List[EvalResult]:
     context = {"content_kind": content_kind}
 
     return run_evaluators(content, target, context=context)
+
+
+def _load_proposal_by_id_or_path(proposal_id: str, proposal_module: Any) -> Any:
+    """Load a proposal from either an id or a path, whichever `--proposal-id` was given.
+
+    The flag advertises an id, but proposal.load_proposal() takes a path, so the documented
+    invocation raised FileNotFoundError until 2026-07-29 -- and the `if not p:` guard at the
+    old call site could never fire, because load_proposal() raises rather than returning None.
+
+    Tries the argument as-is first, then resolves it against get_proposals_dir() (appending
+    `.md` when absent). Attempting the load *before* any filesystem check is deliberate:
+    pre-checking with os.path.isfile() would bypass a stubbed load_proposal, which is how
+    tests/test_evaluate_cli.py exercises this path -- and duplicating the existence check
+    that load_proposal already performs buys nothing.
+
+    Raises FileNotFoundError naming what was tried, so the caller reports a miss instead of
+    surfacing a traceback.
+    """
+    try:
+        return proposal_module.load_proposal(proposal_id)
+    except FileNotFoundError:
+        pass
+    name = proposal_id if proposal_id.endswith(".md") else f"{proposal_id}.md"
+    candidate = os.path.join(proposal_module.get_proposals_dir(), name)
+    try:
+        return proposal_module.load_proposal(candidate)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"tried {proposal_id!r} and {candidate!r}"
+        ) from None
 
 
 def _fetch_proposal_markdown(proposal_id: str) -> Optional[str]:
@@ -1358,13 +1484,22 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
     # later measure cumulative drift against where the target started. Resolved the same
     # way evaluate_skill_text() resolved it above, so the size recorded is the size that
     # was actually judged.
+    # A malformed proposal records no sizes at all. Its "content" is an error message, and
+    # original_size_for_target() takes the *earliest* non-empty content_size as the
+    # cumulative-drift baseline -- so persisting ~100 bytes of explanatory prose here would
+    # become "where this skill started" and make every later cumulative check nonsense (a
+    # real body would read as several-thousand-percent growth). Omitting both sizes leaves
+    # the lookup skipping this entry, exactly as it skips pre-size-recording history.
     content, content_kind, baseline = _extract_evaluated_content(proposal)
-    baseline = _resolve_baseline(proposal, content_kind, baseline)
-    append_history(
-        target, combined_result, session_ids=resolved_session_ids,
-        content_size=len(content.encode("utf-8")),
-        baseline_size=len(baseline.encode("utf-8")) if baseline else None,
-    )
+    if content_kind == MALFORMED_CONTENT_KIND:
+        append_history(target, combined_result, session_ids=resolved_session_ids)
+    else:
+        baseline = _resolve_baseline(proposal, content_kind, baseline)
+        append_history(
+            target, combined_result, session_ids=resolved_session_ids,
+            content_size=len(content.encode("utf-8")),
+            baseline_size=len(baseline.encode("utf-8")) if baseline else None,
+        )
     if auto_prune:
         prune_history()
 
@@ -1484,16 +1619,19 @@ def main():
                 sys.exit(1)
             # Load the proposal and evaluate it
             import proposal as proposal_module
-            p = proposal_module.load_proposal(args.proposal_id)
-            if not p:
-                print(f"Proposal not found: {args.proposal_id}", file=sys.stderr)
+            try:
+                p = _load_proposal_by_id_or_path(args.proposal_id, proposal_module)
+            except (FileNotFoundError, ValueError) as e:
+                print(f"Could not load proposal {args.proposal_id!r}: {e}", file=sys.stderr)
                 sys.exit(1)
             results = evaluate_proposal(p)
             for r in results:
                 print(f"{r.evaluator_name}: score={r.score:.2f} passed={r.passed} feedback={r.feedback}")
-            # Also write to history
+            # Keyed off the loaded proposal's own id, never the CLI argument: when a path is
+            # passed, `proposal:<path>` would put a filesystem path into the same target
+            # namespace RegressionEvaluator and find_low_scoring_targets() read.
             append_history(
-                f"proposal:{args.proposal_id}",
+                f"proposal:{p.proposal_id}",
                 EvalResult(
                     score=sum(r.score for r in results) / len(results) if results else 0,
                     passed=all(r.passed for r in results),
@@ -1502,7 +1640,7 @@ def main():
                 ),
                 content_size=len(json.dumps([getattr(p, 'summary', ''), getattr(p, 'rationale', '')]).encode("utf-8")),
             )
-            print(f"History entry written for proposal:{args.proposal_id}")
+            print(f"History entry written for proposal:{p.proposal_id}")
             return
 
         elif args.eval_target == "tool_calls":

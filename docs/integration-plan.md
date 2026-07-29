@@ -274,7 +274,9 @@ hermes config set skills.evolution.min_confidence 0.85
 - [x] Sin break en el pipeline sin el extra: `_require_gepa()` falla con mensaje accionable
 
 ### Fase 4 (parcial)
-- [ ] SKILL.md publicado en GitHub — **el repo no tiene remoto configurado todavía**
+- [~] SKILL.md publicado en GitHub — remoto configurado 2026-07-29
+      (`git@github.com:Carlo1911/skill-evolution.git`); falta el primer push y hacer el repo
+      público para que la URL raw sea instalable
 - [x] README con instrucciones claras — corregido 2026-07-26 (decía instalar `dspy`)
 - [x] Scripts auto-contenidos (sin depender de ai-memory-stack) — producción ya ejecuta este
       repo vía symlink; las copias en ai-memory-stack quedaron marcadas como obsoletas

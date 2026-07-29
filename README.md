@@ -10,8 +10,7 @@ Reads past sessions, analyzes them against loaded skills, generates structured p
 
 ```bash
 # Install the skill
-# Replace <owner> with the account hosting your fork; this repo has no published remote yet.
-hermes skills install https://raw.githubusercontent.com/<owner>/hermes-skill-evolution/main/SKILL.md
+hermes skills install https://raw.githubusercontent.com/Carlo1911/skill-evolution/main/SKILL.md
 
 # Load it
 hermes -s hermes-skill-evolution
