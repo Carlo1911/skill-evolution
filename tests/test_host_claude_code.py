@@ -123,7 +123,10 @@ def test_happy_path_multi_record_fixture(claude_home):
     assert session["session_id"] == "sess-abc"
     assert session["title"] == "Debugging a flaky test"
     assert session["model"] == "claude-sonnet-5"
-    assert session["started_at"] == "2026-07-20T10:00:00Z"
+    # started_at is stored as an epoch float (matching Hermes's SQLite REAL type, R4),
+    # not the raw ISO string a JSONL record carries.
+    assert session["started_at"] == host._parse_claude_code_timestamp("2026-07-20T10:00:00Z")
+    assert isinstance(session["started_at"], float)
     assert session["message_count"] == 2
     assert session["user_messages"] == 1
     assert session["assistant_messages"] == 1
@@ -284,7 +287,7 @@ def test_started_at_resolves_from_first_timestamped_record_not_record_zero(claud
     adapter = host.ClaudeCodeAdapter()
     session = list(adapter.iter_sessions())[0]
 
-    assert session["started_at"] == "2026-07-21T12:00:00Z"
+    assert session["started_at"] == host._parse_claude_code_timestamp("2026-07-21T12:00:00Z")
 
 
 # ── Scenario 9: secret dropped, email masked, via the shared summarizer ─
@@ -336,6 +339,37 @@ def test_fallback_title_never_stores_raw_secret_or_pii(claude_home):
 
     session2 = [s for s in adapter.iter_sessions() if s["session_id"] == "sess-title-pii"][0]
     assert "carlo0071@example.com" not in session2["title"]
+
+
+# ── Scenario 10b: a custom-title record itself containing a secret/PII ──
+# Regression test for a P0 finding (security review): title_from_custom used to be
+# stored verbatim, bypassing the same redaction the fallback-title path already applies.
+
+def test_custom_title_record_never_stores_raw_secret_or_pii(claude_home):
+    path = _session_file(claude_home)
+    secret_text = "my token is ghp_abcdefghijklmnopqrstuvwxyz012345"
+    assert fetch_sessions.contains_secret(secret_text)
+
+    _write_jsonl(path, [
+        custom_title_record("sess-ct-secret", secret_text),
+        user_record("sess-ct-secret", "2026-07-20T05:00:00Z", "hello"),
+    ])
+
+    adapter = host.ClaudeCodeAdapter()
+    session = list(adapter.iter_sessions())[0]
+
+    assert "ghp_" not in session["title"]
+
+    path2 = _session_file(claude_home, filename="sess2.jsonl")
+    pii_text = "email me at carlo0071@example.com please"
+    _write_jsonl(path2, [
+        custom_title_record("sess-ct-pii", pii_text),
+        user_record("sess-ct-pii", "2026-07-20T05:00:00Z", "hello"),
+    ])
+
+    session2 = [s for s in adapter.iter_sessions() if s["session_id"] == "sess-ct-pii"][0]
+    assert "carlo0071@example.com" not in session2["title"]
+    assert "[PII:email]" in session2["title"]
 
 
 # ── Scenario 11: iter_skills() dot-prefix filtering + category stamping ─
@@ -435,3 +469,32 @@ def test_since_none_is_unbounded(claude_home):
     results = list(adapter.iter_sessions(since=None))
 
     assert {s["session_id"] for s in results} == {"sess-ancient"}
+
+
+def test_since_ignores_a_stray_old_timestamp_on_a_leading_non_message_record(claude_home):
+    """Regression test for a P1 finding (adversarial review): a `system`/`mode` record
+    can legitimately carry its own `timestamp` field (verified against real session
+    data), and if it happens to predate the `since` window while the actual
+    conversation is recent, the since-filter must not use that housekeeping record's
+    timestamp to drop the whole session."""
+    from datetime import datetime, timedelta, timezone
+
+    path = _session_file(claude_home)
+    now = datetime.now(timezone.utc)
+    recent_iso = now.isoformat().replace("+00:00", "Z")
+    _write_jsonl(path, [
+        system_record("sess-stray-old-ts", ts="2020-01-01T00:00:00Z"),  # old, non-message
+        mode_record("sess-stray-old-ts", ts="2020-01-01T00:00:01Z"),    # old, non-message
+        user_record("sess-stray-old-ts", recent_iso, "recent message"),
+        assistant_record("sess-stray-old-ts", recent_iso, "recent reply"),
+    ])
+
+    adapter = host.ClaudeCodeAdapter()
+    since = now - timedelta(hours=1)
+    results = list(adapter.iter_sessions(since=since))
+
+    assert {s["session_id"] for s in results} == {"sess-stray-old-ts"}
+    # started_at metadata may still reflect the earliest timestamp seen (the system
+    # record's), but the since-filter itself must have keyed off the message timestamp.
+    session = results[0]
+    assert session["message_count"] == 2

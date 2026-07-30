@@ -16,7 +16,7 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -549,9 +549,17 @@ def fetch_sessions(
     lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
     max_sessions: int = DEFAULT_MAX_SESSIONS,
     dry_run: bool = False,
+    host: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch recent unprocessed sessions from state.db."""
-    resolved_host = _resolve_host()
+    """Fetch recent unprocessed sessions from state.db.
+
+    `host` identifies which processed-state namespace to read/write (KTD5) --
+    defaults to `_resolve_host()`'s own env-var resolution when not given explicitly.
+    Callers that already resolved a specific adapter (e.g. `host.HermesAdapter`) should
+    pass their own identity here rather than relying on the ambient env var, which may
+    have moved on since the adapter was resolved.
+    """
+    resolved_host = _resolve_host(host)
     processed = set(load_processed(host=resolved_host))
     cutoff = datetime.now(timezone.utc).timestamp() - (lookback_hours * 3600)
 
@@ -777,35 +785,90 @@ def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH,
         conn.close()
 
 
+def fetch_sessions_for_host(
+    host_name: str,
+    lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
+    dry_run: bool = False,
+) -> List[Dict[str, Any]]:
+    """Fetch recent unprocessed sessions from a non-Hermes host adapter.
+
+    `HostAdapter.iter_sessions()` is a pure read with no processed-state awareness (see
+    host.py's docstring) -- `HermesAdapter` gets dedup/marking for free by delegating to
+    `fetch_sessions()` above, which does both internally. This function is what gives
+    every *other* adapter the identical guarantee: filter against `load_processed()`,
+    then (unless `dry_run`) `mark_processed()` and `prune_processed()`, mirroring
+    `fetch_sessions()`'s own side-effect contract at the orchestration layer instead of
+    inside the adapter.
+
+    `host` is imported locally: this module is imported BY `host.py` (`HermesAdapter`
+    delegates to `fetch_sessions()`), so a module-scope `import host` here would cycle.
+    """
+    import host as host_module
+
+    adapter = host_module.get_adapter(host_name)
+    processed = set(load_processed(host=host_name))
+    since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+
+    results = [
+        session for session in adapter.iter_sessions(since=since)
+        if session["session_id"] not in processed
+    ]
+
+    if dry_run:
+        return results
+
+    just_processed = {s["session_id"] for s in results}
+    new_processed = list(processed | just_processed)
+    mark_processed(new_processed, host=host_name)
+
+    _warn_if_state_retention_below_lookback(lookback_hours)
+    prune_processed(keep_ids=just_processed, host=host_name)
+
+    return results
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Fetch unprocessed Hermes sessions")
-    parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
+    parser = argparse.ArgumentParser(description="Fetch unprocessed sessions from the active host")
+    parser.add_argument("--db-path", default=DEFAULT_DB_PATH,
+                        help="Hermes-only: state.db path. Ignored when SKILL_EVOLUTION_HOST "
+                             "resolves to a non-hermes adapter.")
     parser.add_argument("--lookback-hours", type=int, default=DEFAULT_LOOKBACK_HOURS)
-    parser.add_argument("--max-sessions", type=int, default=DEFAULT_MAX_SESSIONS)
+    parser.add_argument("--max-sessions", type=int, default=DEFAULT_MAX_SESSIONS,
+                        help="Hermes-only: ignored when SKILL_EVOLUTION_HOST resolves to a "
+                             "non-hermes adapter.")
     parser.add_argument("--dry-run", action="store_true", help="Print counts without marking processed")
     parser.add_argument("--prune-state", action="store_true",
                         help="Prune the processed-session state file per "
                              "SKILL_EVOLUTION_STATE_RETENTION and exit")
     args = parser.parse_args()
 
+    resolved_host = _resolve_host()
+
     if args.prune_state:
         # Structurally like evaluate.py's --prune (before/after count, early return), but
         # reporting to stderr rather than stdout: unlike evaluate.py, this script's stdout
         # is the NDJSON channel other tooling parses (nothing but fetch_sessions.py may
         # write to stdout), so a manual maintenance report cannot share that stream.
-        resolved_host = _resolve_host()
         before = len(load_processed(host=resolved_host))
         prune_processed(host=resolved_host)
         after = len(load_processed(host=resolved_host))
         print(f"Pruned state: {before} -> {after} processed session ids", file=sys.stderr)
         return
 
-    sessions = fetch_sessions(
-        db_path=args.db_path,
-        lookback_hours=args.lookback_hours,
-        max_sessions=args.max_sessions,
-        dry_run=args.dry_run,
-    )
+    if resolved_host == DEFAULT_HOST:
+        sessions = fetch_sessions(
+            db_path=args.db_path,
+            lookback_hours=args.lookback_hours,
+            max_sessions=args.max_sessions,
+            dry_run=args.dry_run,
+            host=resolved_host,
+        )
+    else:
+        sessions = fetch_sessions_for_host(
+            resolved_host,
+            lookback_hours=args.lookback_hours,
+            dry_run=args.dry_run,
+        )
 
     for session in sessions:
         sys.stdout.write(json.dumps(session) + "\n")

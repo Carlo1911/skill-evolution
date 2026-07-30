@@ -239,6 +239,38 @@ def test_hermes_adapter_iter_sessions_none_since_is_effectively_unbounded(db_pat
     assert {r["session_id"] for r in results} == {"sess-very-old"}
 
 
+def test_hermes_adapter_iter_sessions_uses_its_own_identity_for_state_scoping(db_path, monkeypatch):
+    """Regression test for a P2 finding (adversarial review): get_adapter("hermes")
+    can be requested explicitly while SKILL_EVOLUTION_HOST names a different host.
+    HermesAdapter.iter_sessions() must check "already processed" against its own
+    "hermes" identity, not silently re-derive a different host from the ambient env
+    var one layer down inside fetch_sessions()."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, title) VALUES (?, ?, ?, ?, ?)",
+        ("sess-1", "claude-code", "claude", __import__("time").time(), "a session"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv(fetch_sessions.DB_PATH_ENV_VAR, db_path)
+    # Pre-mark sess-1 as processed under "hermes" specifically.
+    fetch_sessions.mark_processed(["sess-1"], host="hermes")
+    # The ambient env var names a DIFFERENT host than the adapter being used directly --
+    # if HermesAdapter.iter_sessions() re-derived its host from this env var instead of
+    # its own identity, it would check the (empty) "claude_code" processed set instead
+    # of "hermes"'s, and sess-1 would wrongly reappear as unprocessed.
+    monkeypatch.setenv(host.HOST_ENV_VAR, "claude_code")
+
+    adapter = host.get_adapter("hermes")  # explicit arg wins over the env var (KTD1)
+    assert isinstance(adapter, host.HermesAdapter)
+    results = list(adapter.iter_sessions())
+
+    assert results == [], (
+        "sess-1 was already marked processed under host=\"hermes\"; it must not "
+        "reappear just because SKILL_EVOLUTION_HOST names a different host"
+    )
+
+
 def test_hermes_adapter_iter_skills_delegates_to_scan_skills(tmp_path, monkeypatch):
     _write_skill(tmp_path, "general-skills", "deploy-helper")
     original_scan_skills = skill_index.scan_skills

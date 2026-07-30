@@ -289,8 +289,9 @@ def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):
     """Run one GEPA optimization pass over an installed skill's body against its own
     recorded session history.
 
-    Resolves `skill_name` to its installed SKILL.md via skill_index.scan_skills() and
-    reads that file's text as the seed candidate, then fetches the skill's full session
+    Resolves `skill_name` to its installed SKILL.md via the active host adapter
+    (`_find_skill_matches()`, U2) and reads that file's text as the seed candidate, then
+    fetches the skill's full session
     history via fetch_sessions.sessions_for_skill() (U1). If fewer than MIN_SESSIONS
     sessions are on record, returns a NotEnoughHistoryResult without importing or
     calling gepa at all (R4).

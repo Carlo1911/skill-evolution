@@ -94,12 +94,16 @@ def scan_skills(skills_dir: str = SKILLS_DIR) -> list:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Scan installed Hermes skills")
+    parser = argparse.ArgumentParser(description="Scan installed skills for the active host")
     parser.add_argument("--categories-only", action="store_true")
     parser.add_argument("--name", type=str, default=None)
     args = parser.parse_args()
 
-    skills = scan_skills()
+    # host is imported locally: host.py imports this module (HermesAdapter delegates to
+    # scan_skills()), so a module-scope `import host` here would cycle.
+    import host as host_module
+
+    skills = host_module.get_adapter().iter_skills()
 
     if args.name:
         skills = [s for s in skills if args.name.lower() in s["name"].lower()]

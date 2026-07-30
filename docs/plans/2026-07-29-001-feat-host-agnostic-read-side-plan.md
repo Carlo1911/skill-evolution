@@ -350,8 +350,11 @@ that delegate-to-existing-defaults approach; this is the corrected check.)
 
 **Goal:** A second host produces proposal-ready sessions and skills.
 
-**Files:** `scripts/host.py`, `tests/test_host_claude_code.py` (new), fixtures under
-`tests/fixtures/claude_code/`.
+**Files:** `scripts/host.py`, `tests/test_host_claude_code.py` (new). Fixtures are built
+inline via `tmp_path` and hand-authored dicts/JSON strings in the test file itself, not as
+static files under a `tests/fixtures/claude_code/` directory — an implementation choice
+made during execution, since inline synthetic fixtures kept the redacted-vs-real-data
+guarantee (see Execution note) auditable directly in the test that uses them.
 
 **Approach:** `iter_skills()` globs `~/.claude/skills/*/SKILL.md`, reusing
 `parse_name_description_frontmatter()`, stamping `category: "user"` (KTD3), and skipping any
@@ -448,7 +451,7 @@ False` with the host named. Every `SKILL_EVOLUTION_*` var still documented (the 
 | `scripts/optimize_skill.py` | `_find_skill_matches()` → adapter (`_installed_body()` unchanged, adapter-backed transitively) |
 | `scripts/proposal.py` | non-Hermes host → `can_apply: False` |
 | `tests/test_host_registry.py` | **new** — U1 |
-| `tests/test_host_claude_code.py` | **new** — U3 |
+| `tests/test_host_claude_code.py` | **new** — U3, fixtures built inline (no static `tests/fixtures/claude_code/` dir) |
 | `tests/test_host_conformance.py` | **new** — U4, parametrized over both |
 | `tests/fixtures/claude_code/` | **new** — redacted JSONL + flat skill tree |
 | `CLAUDE.md`, `SKILL.md`, `README.md` | the seam, the two contracts, the new env var |

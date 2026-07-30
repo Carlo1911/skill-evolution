@@ -161,6 +161,12 @@ class HermesAdapter(HostAdapter):
             db_path=fetch_sessions.get_state_db_path(),
             lookback_hours=lookback_hours,
             dry_run=True,
+            # Pass this adapter's own identity explicitly rather than letting
+            # fetch_sessions() re-derive it from the ambient env var: get_adapter("hermes")
+            # can be requested explicitly while SKILL_EVOLUTION_HOST names a different
+            # host, and the processed-state namespace must follow the resolved adapter,
+            # not whatever the env var says right now.
+            host=self.name,
         )
 
     def iter_skills(self) -> List[Dict[str, Any]]:
@@ -369,6 +375,7 @@ class ClaudeCodeAdapter(HostAdapter):
         messages: List[Dict[str, str]] = []
         first_user_content = None
         saw_any_record = False
+        since_check_done = False
 
         for record in self._iter_jsonl_records(path):
             saw_any_record = True
@@ -376,6 +383,7 @@ class ClaudeCodeAdapter(HostAdapter):
                 continue
 
             rtype = record.get("type")
+            role = _role_for_claude_code_type(rtype)
 
             if session_id is None:
                 sid = record.get("sessionId")
@@ -386,8 +394,23 @@ class ClaudeCodeAdapter(HostAdapter):
                 # Scan forward past leading records that lack a timestamp (small
                 # records like custom-title/mode commonly come first) -- this is the
                 # first record that actually HAS one, not literally record zero.
-                started_at = record["timestamp"]
-                epoch = _parse_claude_code_timestamp(started_at)
+                # Stored as an epoch float, not the raw ISO string: R4 requires
+                # iter_sessions() output to match Hermes in *type*, not just key set, and
+                # Hermes's started_at is a SQLite REAL (a Python float). A timestamp that
+                # fails to parse falls back to 0.0 rather than leaving started_at as a
+                # differently-typed string.
+                started_at = _parse_claude_code_timestamp(record["timestamp"]) or 0.0
+
+            # The since-window decision is gated on the first MESSAGE-bearing record's
+            # own timestamp, deliberately independent of `started_at` above. A non-message
+            # record (system/mode/etc.) can carry an unrelated timestamp -- e.g. a hook
+            # logged before the conversation actually started -- and real session files
+            # show `system` records with a `timestamp` field. Gating the early-return on
+            # that timestamp would silently drop a real, in-window session because of a
+            # housekeeping record's date, not the conversation's.
+            if not since_check_done and role is not None and "timestamp" in record:
+                since_check_done = True
+                epoch = _parse_claude_code_timestamp(record["timestamp"])
                 # Mirrors the SQL path filtering by started_at before ever fetching
                 # message bodies: stop reading the rest of this file as soon as we know
                 # it's out of window, rather than parsing every remaining message first.
@@ -408,7 +431,6 @@ class ClaudeCodeAdapter(HostAdapter):
                 if entrypoint:
                     source = str(entrypoint)
 
-            role = _role_for_claude_code_type(rtype)
             if role is None:
                 continue  # not a message: attachment/custom-title/system/mode/etc.
 
@@ -433,7 +455,8 @@ class ClaudeCodeAdapter(HostAdapter):
         if session_id is None:
             session_id = path.stem
 
-        title = title_from_custom if title_from_custom is not None else self._fallback_title(first_user_content)
+        title_candidate = title_from_custom if title_from_custom is not None else first_user_content
+        title = self._sanitize_title(title_candidate)
 
         # Reuse the shared summarizer directly rather than reimplementing truncation,
         # secret-dropping, or PII-masking -- it only ever reads msg["role"]/msg["content"],
@@ -453,18 +476,19 @@ class ClaudeCodeAdapter(HostAdapter):
         }
 
     @staticmethod
-    def _fallback_title(first_user_content: Optional[str]) -> str:
-        """Title fallback when no custom-title record exists: the first user message's
-        content, truncated -- but only after the same redaction discipline every other
-        message body gets. This path bypasses _summarize_messages() entirely (a title
-        isn't a message), so without this it would leak a secret or PII straight into
-        the session dict's `title` field, unredacted, in a way no other code path checks.
+    def _sanitize_title(candidate: Optional[str]) -> str:
+        """Redact/mask a candidate title the same way every message body gets --
+        applies to BOTH title sources: a `custom-title` record's text and the
+        first-user-message fallback. Neither source passes through
+        `_summarize_messages()` (a title isn't a message), so without this either one
+        would leak a secret or PII straight into the session dict's `title` field,
+        unredacted, in a way no other code path checks.
         """
-        if not first_user_content:
+        if not candidate:
             return ""
-        if fetch_sessions.contains_secret(first_user_content):
+        if fetch_sessions.contains_secret(candidate):
             return "[redacted: title source contained a secret]"
-        masked = fetch_sessions.redact_pii(first_user_content)
+        masked = fetch_sessions.redact_pii(candidate)
         return masked[:TITLE_FALLBACK_MAX_CHARS]
 
     @staticmethod

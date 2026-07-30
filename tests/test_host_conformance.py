@@ -193,6 +193,23 @@ def test_iter_sessions_shape_is_identical_across_hosts(built_adapter):
                 f"{host_name} adapter's session['messages'] must contain only dicts, "
                 f"got {type(msg).__name__}"
             )
+        # R4 requires "same keys, same types" -- key-set equality alone doesn't catch a
+        # host returning started_at as a raw ISO string instead of Hermes's epoch float
+        # (a real bug this exact check caught: adversarial review, tests/test_host_claude_code.py).
+        assert isinstance(session["started_at"], float), (
+            f"{host_name} adapter's session['started_at'] must be a float (epoch seconds, "
+            f"matching Hermes's SQLite REAL column), got {type(session['started_at']).__name__}"
+        )
+        for key in ("session_id", "title", "model", "source"):
+            assert isinstance(session[key], str), (
+                f"{host_name} adapter's session['{key}'] must be a str, "
+                f"got {type(session[key]).__name__}"
+            )
+        for key in ("message_count", "user_messages", "assistant_messages"):
+            assert isinstance(session[key], int), (
+                f"{host_name} adapter's session['{key}'] must be an int, "
+                f"got {type(session[key]).__name__}"
+            )
 
 
 # ── The one shared conformance assertion for iter_skills() ─────────────
