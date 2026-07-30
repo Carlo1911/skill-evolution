@@ -19,6 +19,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 import evaluate
+import host
 
 
 class ProposalType(str, Enum):
@@ -328,6 +329,24 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
 
     if proposal.confidence < min_confidence:
         raise ValueError(f"Confidence {proposal.confidence:.2f} below threshold {min_confidence:.2f}")
+
+    # Write-side host guard: the only mutation this function can perform is emitting
+    # skill_manage instructions and flipping status to 'applied', and skill_manage is a
+    # Hermes-only tool (see CLAUDE.md's host-agnostic conventions -- the write side is not
+    # built for any other host yet). Checked before the evaluation gate runs at all: there
+    # is no point spending a provider call scoring a proposal that can never be applied,
+    # and checking here (rather than after the gate) also means a non-Hermes host never
+    # appends an entry to eval_history.jsonl for a proposal it was never going to apply.
+    resolved_host = host.resolve_host()
+    if resolved_host != "hermes":
+        return {
+            "can_apply": False,
+            "action": proposal.type.value,
+            "target_skill": proposal.target_skill or "",
+            "instructions": [],
+            "evaluation_results": [],
+            "reason": f"apply_proposal() only supports the hermes host today; resolved host is '{resolved_host}'",
+        }
 
     # Evaluation gate: run after status/confidence, before mutating the proposal.
     # Fail closed (R21) on any error here too -- not just inside individual

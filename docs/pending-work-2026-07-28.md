@@ -268,25 +268,43 @@ proposal whose *content* is fine.
 
 ### P2-2. Host-agnostic / multi-agent support
 
-The owner's stated principle is that the more agnostic the design, the better, and
-multi-agent support (Codex, Claude Code, future hosts) is an explicit project goal. The
-coupling is already mapped to exactly four seams, each isolated in one module:
+**Status: read side shipped (U1–U4); write side still open (U5 added a fail-loud guard,
+not a second host that can actually apply).** The owner's stated principle is that the
+more agnostic the design, the better, and multi-agent support (Codex, Claude Code, future
+hosts) is an explicit project goal. The coupling used to be mapped to four hardcoded
+seams, each isolated in one module but not otherwise abstracted:
 
-| Seam | Module | What is Hermes-specific |
-|---|---|---|
-| Session source | `fetch_sessions.py` | `~/.hermes/state.db` and its SQLite schema |
-| Skill source | `skill_index.py` | `~/.hermes/skills/<category>/<skill>/SKILL.md` |
-| Processed state | `state.py` | `~/.hermes/skill_evolution_state.json` |
-| Mutation tool | `proposal.py` | emits `skill_manage` instruction dicts |
+| Seam | Module | What was Hermes-specific | Status |
+|---|---|---|---|
+| Session source | `fetch_sessions.py` | `~/.hermes/state.db` and its SQLite schema | Read side abstracted — see below |
+| Skill source | `skill_index.py` | `~/.hermes/skills/<category>/<skill>/SKILL.md` | Read side abstracted — see below |
+| Processed state | `state.py` | `~/.hermes/skill_evolution_state.json` | Host-prefixed, not yet an adapter method |
+| Mutation tool | `proposal.py` | emits `skill_manage` instruction dicts | Still Hermes-only; now refuses loudly (U5) instead of failing silently |
 
 Everything else — evaluator registry, gate, size guards, history, provider layer, analyzer
-prompt — is already host-neutral, because it operates on skill *text* and proposal *shape*,
-not provenance.
+prompt — was already host-neutral before this work, because it operates on skill *text*
+and proposal *shape*, not provenance.
 
-**The read side generalizes cheaply; the write side is the expensive half** — no host
-outside Hermes exposes `skill_manage`, so each new host needs its own apply strategy. A
-first increment could be read-only support (ingest another host's sessions and skills,
-produce proposals) without touching the write side at all.
+**The read side is now a real abstraction, not just an isolation convention.**
+`scripts/host.py` defines a `HostAdapter` ABC (`iter_sessions`, `iter_skills`,
+`read_skill_body`), a `HOST_ADAPTERS` registry, and `resolve_host()`/`get_adapter()` reading
+`SKILL_EVOLUTION_HOST` (default `hermes`). Two adapters are registered: `HermesAdapter`
+(byte-identical to pre-abstraction behavior, delegating to `fetch_sessions.py`/
+`skill_index.py`) and `ClaudeCodeAdapter` (`SKILL_EVOLUTION_CLAUDE_CODE_HOME`, default
+`~/.claude`; reads `skills/*/SKILL.md` and `projects/*/*.jsonl`). `evaluate.py` and
+`optimize_skill.py` now read skills through `host.get_adapter()` rather than calling
+`skill_index.scan_skills()` directly. A conformance test suite exercises both adapters
+against the shared session-dict/skill-dict contracts. See CLAUDE.md's "Prefer
+host-agnostic design" entry for the full shape of both contracts.
+
+**The write side generalizes at a different, higher cost — no host outside Hermes exposes
+`skill_manage`, so each new host needs its own apply strategy, not just an adapter.** That
+part is still unbuilt. What U5 added instead is a guard so the gap fails loudly rather than
+silently: `apply_proposal()` now checks `host.resolve_host()` before the evaluation gate
+runs at all, and returns `can_apply: False` with a `reason` naming the resolved host on
+anything other than `hermes` — rather than emitting `skill_manage` instructions no runtime
+can execute, or spending a provider call scoring a proposal that could never be applied. A
+real write path for a second host (e.g. Claude Code) remains a future increment.
 
 ### P2-3. Skill quality tracking (`integration-plan.md` Fase 2)
 
@@ -424,8 +442,11 @@ review:
 2. **P1-2** (live-verify the two new providers) — now the top open item, and cheap: it is the
    only thing standing between "shipped" and "proven" for work already merged. P0-5 is the
    argument for doing it — a shape nobody exercised was wrong in production for two days.
-3. Then **P2-2** (host-agnostic), which is the highest stated owner interest. Start with the
-   read side; the write side needs a per-host apply strategy and is the expensive half.
+3. **P2-2** (host-agnostic) — read side done (U1-U4: `HostAdapter`, `HermesAdapter`,
+   `ClaudeCodeAdapter`, conformance test) plus a write-side guard (U5). The write side
+   itself — a real apply strategy for a non-Hermes host — remains open and needs a
+   per-host approach, not just an adapter; take it up only with explicit owner sign-off
+   given the blast radius (mutating installed skills).
 4. **P2-1** (gate the new targets) whenever the owner wants to decide it — the code is
    already in place, so this is a policy change, not a build.
 

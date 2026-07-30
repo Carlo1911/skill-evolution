@@ -60,6 +60,7 @@ hermes-skill-evolution/
 │   ├── skill_index.py          # Scan skills → JSON index
 │   ├── analyze.py              # Format sessions for LLM
 │   ├── proposal.py             # Proposal schema, I/O, apply logic
+│   ├── host.py                 # Host adapter seam (HermesAdapter, ClaudeCodeAdapter)
 │   ├── evaluate.py             # Evaluation gate (deterministic + LLM-judge + regression)
 │   ├── optimize_skill.py       # Optional GEPA optimizer (needs the `gepa` extra)
 │   ├── state.py                # Track processed sessions
@@ -88,6 +89,18 @@ Proposals with confidence above threshold still have to pass the evaluation gate
 The absolute cap is a **ratchet**: a skill already over the limit can still be replaced by a body no larger than itself, so an oversized skill stays improvable without ever getting worse, while a *new* skill is never created over the limit. Size comparisons measure against the installed `SKILL.md` on disk, not against the "current value" a proposal reports about itself.
 
 Note that **no automated step applies a proposal.** The analysis run writes proposals and stops; the analyzer prompt forbids it from calling `skill_manage` whatever the confidence. `apply_proposal()` is invoked by a human, or by a step you write. See `SKILL.md` for the details and `SKILL_EVOLUTION_*` environment variables.
+
+### Host support
+
+Sessions and skills are read through a `HostAdapter` (`scripts/host.py`), selected via
+`SKILL_EVOLUTION_HOST` (default `hermes`). `HermesAdapter` reproduces the original
+`~/.hermes/state.db` / `~/.hermes/skills/` behavior; `ClaudeCodeAdapter`
+(`SKILL_EVOLUTION_CLAUDE_CODE_HOME`, default `~/.claude`) reads Claude Code's
+`skills/*/SKILL.md` and `projects/*/*.jsonl` layout instead. This covers the read side only
+— `apply_proposal()` still only knows how to emit Hermes's `skill_manage` instructions, and
+returns `can_apply: False` naming the resolved host on anything else, rather than emitting
+instructions no runtime can execute. See `SKILL.md` and `CLAUDE.md` for the adapter
+contracts a new host would need to satisfy.
 
 ### LLM providers
 

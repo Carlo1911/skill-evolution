@@ -262,6 +262,8 @@ python3 scripts/optimize_skill.py --skill <name> [--iterations N]
 | `SKILL_EVOLUTION_DB_PATH` | `~/.hermes/state.db` | Session database the `tool_calls` / `analyzer_prompt` targets read. `fetch_sessions.py` takes `--db-path` instead; this covers the in-process callers that have no flag to thread a path through |
 | `SKILL_EVOLUTION_STATE_FILE` | `~/.hermes/skill_evolution_state.json` | Which sessions have already been analyzed; override to run against isolated state |
 | `SKILL_EVOLUTION_STATE_RETENTION` | unbounded | Max processed-session entries (bare int) or age (`90d`, `6mo`); flat-dict state shape only (see below); applies automatically, and via `fetch_sessions.py --prune-state` |
+| `SKILL_EVOLUTION_HOST` | `hermes` | Which host adapter (`scripts/host.py`) session/skill reads route through — `hermes` or `claude_code`. Read-only today: `apply_proposal()` refuses (`can_apply: False`) on any non-`hermes` host, since `skill_manage` — the tool it emits instructions for — only exists on Hermes |
+| `SKILL_EVOLUTION_CLAUDE_CODE_HOME` | `~/.claude` | Root directory the `claude_code` host adapter reads skills (`skills/*/SKILL.md`) and sessions (`projects/*/*.jsonl`) from |
 | `SKILL_EVOLUTION_AUTO_APPLY` / `_MIN_CONFIDENCE` | `false` / `0.85` | Inputs to `apply_proposal()`; the analysis session never self-applies regardless |
 | `SKILL_EVOLUTION_OPTIMIZER_ENABLED` | `false` | Enables `scripts/optimize_skill.py` |
 | `SKILL_EVOLUTION_OPTIMIZER_MIN_SESSIONS` | `3` | Minimum recorded sessions before the optimizer will run for a skill |

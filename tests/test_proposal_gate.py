@@ -165,6 +165,40 @@ def test_gate_level_error_blocks_apply_instead_of_crashing(monkeypatch, isolated
     assert "evaluation_error" in result
 
 
+_REAL_SAVE_PROPOSAL = proposal_module.save_proposal
+
+
+def test_non_hermes_host_blocks_apply_before_gate_without_mutating_file(monkeypatch, tmp_path):
+    """U5: apply_proposal() only supports the hermes host today. A non-hermes resolved
+    host must refuse immediately -- before the evaluation gate ever runs (no provider
+    call spent on a proposal that can never be applied) -- and without mutating the
+    proposal file on disk or its in-memory status."""
+    # Override the isolated_history fixture's save_proposal stub with the real function
+    # for this test only, so "the file is untouched" is actually load-bearing here.
+    monkeypatch.setattr(proposal_module, "save_proposal", _REAL_SAVE_PROPOSAL)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("evaluation gate must not run when the host is unsupported")
+
+    monkeypatch.setattr(evaluate, "evaluate_and_record", _boom)
+    monkeypatch.setenv("SKILL_EVOLUTION_HOST", "claude_code")
+
+    proposal = _make_proposal()
+    path = proposal_module.save_proposal(proposal, directory=str(tmp_path))
+    with open(path) as f:
+        original_content = f.read()
+    assert "status: proposed" in original_content
+
+    result = apply_proposal(proposal, min_confidence=0.5, directory=str(tmp_path))
+
+    assert result["can_apply"] is False
+    assert "claude_code" in result["reason"]
+    assert proposal.status == ProposalStatus.PROPOSED  # in-memory object also untouched
+
+    with open(path) as f:
+        assert f.read() == original_content
+
+
 def test_apply_proposal_create_new_migrates_history(monkeypatch, isolated_history):
     """After a create_new proposal passes the gate, history is under skill:<name>,
     not proposal:<uuid>. Covers the end-to-end migration wiring."""
