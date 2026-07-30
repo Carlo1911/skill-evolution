@@ -197,9 +197,9 @@ against a real session before it is trusted.
 
 ## P1 — Blocks distribution or leaves a shipped feature unproven
 
-### ~~P1-1. The repo still has no git remote~~ — RESOLVED 2026-07-29
+### P1-1. The repo has a remote and has been pushed — still private
 
-`origin` is now `git@github.com:Carlo1911/skill-evolution.git`, closing the last step of
+`origin` is `git@github.com:Carlo1911/skill-evolution.git`, closing the last step of
 `integration-plan.md` Fase 4. The install URLs in `README.md` and `SKILL.md` carry the real
 path instead of an `<owner>` placeholder.
 
@@ -216,9 +216,19 @@ Both now name the actual author. MIT stays — it is already declared in `LICENS
 the point. The Nous credit remains where it is accurate: inspiration, in the README's About
 section.
 
-**Two things still gate an actual publication**, neither of them code:
-1. Nothing has been pushed yet — `origin` is configured, not populated.
-2. The repo must be **public** for `hermes skills install <raw-url>` to work for anyone else.
+**Amended 2026-07-29 (later same day).** This section previously claimed "nothing has been
+pushed yet." That was wrong at the time of writing — `git reflog show origin/main` records
+`update by push` at 2026-07-29 18:55:08, and `origin/main` already matches local `HEAD`
+(`84c0869`). Verify push state with `git log origin/main..HEAD` (empty = nothing to push)
+rather than trusting this file's prose, since this is exactly the kind of claim that goes
+stale the next time someone pushes.
+
+**One thing still gates an actual publication:** the repo is **private** —
+`https://github.com/Carlo1911/skill-evolution` returns 404 unauthenticated, and the GitHub
+account currently authenticated in `gh` (`CaT-Carlo19`) cannot see it either, confirming it
+isn't just an unauthenticated-view artifact. It must be made **public** for
+`hermes skills install <raw-url>` to work for anyone else. That is an owner action in GitHub
+repo settings, not something to script.
 
 ### P1-2. Neither new provider has been exercised against a live endpoint
 
@@ -409,8 +419,8 @@ review:
 ## Recommended order
 
 0. ~~**All five P0s**~~ — **done 2026-07-29.** Suite 507 → 533.
-1. ~~**P1-1** (git remote)~~ — **done 2026-07-29.** `origin` points at
-   `Carlo1911/skill-evolution`; a first push and making the repo public are what remain.
+1. **P1-1** (git remote) — mostly done: `origin` points at `Carlo1911/skill-evolution` and
+   `main` is already pushed (`origin/main` == `HEAD`). Only making the repo **public** remains.
 2. **P1-2** (live-verify the two new providers) — now the top open item, and cheap: it is the
    only thing standing between "shipped" and "proven" for work already merged. P0-5 is the
    argument for doing it — a shape nobody exercised was wrong in production for two days.

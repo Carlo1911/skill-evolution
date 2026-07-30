@@ -7,6 +7,7 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: pending-work-2026-07-28 P2-2
 execution: code
+deepened: 2026-07-29
 ---
 
 # Host-agnostic read side: name the contracts that already exist, then add a second host
@@ -53,7 +54,7 @@ to four files plus their callers' import lines, not spread across the codebase.
 | | Hermes | Claude Code |
 |---|---|---|
 | Sessions | one SQLite DB, `~/.hermes/state.db`, tables `sessions` + `messages` | one JSONL file per session: `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl` |
-| Session record | rows with `id`, `started_at`, `title`, `model`, `source` | one JSON object per line; `type` ∈ {`user`, `assistant`, `attachment`, `custom-title`, `last-prompt`, `queue-operation`}; keys include `sessionId`, `timestamp`, `message`, `cwd`, `gitBranch`, `version` |
+| Session record | rows with `id`, `started_at`, `title`, `model`, `source` | one JSON object per line; `type` ∈ {`user`, `assistant`, `attachment`, `custom-title`, `last-prompt`, `queue-operation`, `system`, `mode`}; keys include `sessionId`, `timestamp`, `message`, `cwd`, `gitBranch`, `version` |
 | Skills | **nested**: `~/.hermes/skills/<category>/<skill>/SKILL.md` | **flat**: `~/.claude/skills/<skill>/SKILL.md` — no category level |
 | Mutation | `skill_manage` tool | none — skills are plain files |
 
@@ -65,6 +66,20 @@ Two consequences the design has to absorb, and they are the whole substance of t
 2. **Claude Code's skill tree is one level shallower.** `scan_skills()` iterates
    category-dir → skill-dir; a flat tree walked by that loop yields nothing. The adapter
    must synthesize a category (see KTD3).
+
+**Verified against a real installation, not just documentation.** 38 of the 41 entries
+under `~/.claude/skills/` on this machine are symlinks into `~/.agents/skills/`, not real
+directories — `Path.iterdir()`/`.is_dir()` resolve through them transparently (confirmed: a
+glob over `~/.claude/skills/*/SKILL.md` finds all 35 skills that actually carry one), so this
+needs no adapter-side handling, only a note so a future implementer doesn't second-guess the
+design on sight of a symlinked tree. The JSONL side had a real gap: a live session file on
+this machine contains **six** non-message `type` values, not the four the table above
+originally listed — `system` (hook/tool-lifecycle metadata, no `message` field) and `mode`
+(`{mode, sessionId, type}` only) are both real and both absent from every description of this
+format consulted while drafting this plan. Both are now listed above and handled in KTD4/U3.
+This is the same lesson `pending-work-2026-07-28.md` already recorded for
+`evaluate_tool_calls()` (P0-5) — a documented shape is not evidence until checked against a
+real file — landing in a second place in the same repo.
 
 ### The contracts are already host-neutral — they just have no names
 
@@ -131,13 +146,15 @@ def resolve_host(host: Optional[str] = None) -> str:  # explicit arg > env > def
 def get_adapter(host: Optional[str] = None) -> HostAdapter:
 ```
 
-**`resolve_host()` mirrors `resolve_provider()` exactly**, including raising on an unknown
-name rather than silently falling back — the same fail-loud posture, for the same reason: a
-typo'd host that quietly reads the wrong tree is worse than a crash. Governs R1, R2.
+**`resolve_host()`'s resolution order (explicit arg > env > default) mirrors
+`resolve_provider()`**; the raise-on-unknown-name behavior mirrors `call_provider()`'s
+validation and message — the same fail-loud posture, for the same reason: a typo'd host that
+quietly reads the wrong tree is worse than a crash. Governs R1, R2.
 
 ### KTD2. `read_skill_body()` is a third method, not a caller's job
 
-`evaluate.installed_skill_body()` and `optimize_skill._installed_body()` both resolve a skill
+`evaluate.installed_skill_body()` (`scripts/evaluate.py:1103-1106`) and
+`optimize_skill._installed_body()` both resolve a skill
 name to its body text by filtering `scan_skills()` and reading `path`. That works only
 because both hosts happen to expose a filesystem path. A host that stores skills in a
 database or over an API would have a `path` field with nothing behind it, and the leak would
@@ -148,7 +165,13 @@ Putting the read behind the adapter keeps `path` advisory (useful for a human re
 report) rather than load-bearing. The two existing helpers become thin calls into it and
 keep their current best-effort contract — **return `None` on no match, ambiguous match, or
 read failure, never raise** — because `evaluate.py` deliberately degrades rather than failing
-a gate decision on a lookup miss. Governs R3.
+a gate decision on a lookup miss.
+
+`optimize_skill._find_skill_matches()` also routes through `get_adapter().iter_skills()`
+instead of calling `skill_index.scan_skills()` directly, for the same reason: it is the
+lookup `_installed_body()` itself calls to detect an ambiguous duplicate name (the
+`.archive/` twin case), so it constructs the same kind of host-specific knowledge R3 exists
+to contain. Governs R3.
 
 ### KTD3. The Claude Code adapter synthesizes `category` rather than the index dropping the field
 
@@ -168,12 +191,43 @@ masking — is host-neutral and **must not be duplicated per adapter.** It is th
 chokepoint the repo's whole privacy posture rests on, and a second copy is precisely the
 failure mode that produced three divergent `fetch_sessions.py` files (backlog P0-1).
 
-So the split is: the adapter converts host records into a plain
-`[{"role", "content", "tool_calls"}]` list and hands it to the shared summarizer. Claude
-Code's `type` field maps to `role` (`user`/`assistant`), and the four non-message record
-types (`attachment`, `custom-title`, `last-prompt`, `queue-operation`) are dropped — with
-`custom-title` first harvested for the session `title`, since Hermes has a real title column
-and the JSONL has no other source for one. Governs R4, R5.
+So the split is: the adapter converts host records into a plain `[{"role", "content"}]` list
+and hands it to the shared summarizer. Claude
+Code's `type` field maps to `role` (`user`/`assistant`), and the **six** non-message record
+types (`attachment`, `custom-title`, `last-prompt`, `queue-operation`, `system`, `mode`) are
+dropped by an explicit allowlist (map `user`/`assistant`, else drop) rather than a denylist —
+`system` and `mode` were absent from every description of this format consulted while
+drafting this plan and were only found by inspecting a real session file, so the drop list is
+not trusted to be exhaustive going forward. `custom-title` is first harvested for the session
+`title`, since Hermes has a real title column and the JSONL has no other source for one.
+**The candidate title text runs through `contains_secret()`/`redact_pii()` before it is placed
+in the session dict** — falling back to the first user message when there is no
+`custom-title` record means `title` can otherwise carry the same class of live secret or PII
+the message-body path is built to catch, but bypassing that exact chokepoint on its way in,
+since only the messages list (not `title`) was ever named as passing through the shared
+summarizer.
+
+**Real records are not plain strings — content is a block list.** Verified against 60 real
+session files on this machine: assistant `message.content` is a list of content blocks
+(`text`, `thinking`, `tool_use`) in 100% of sampled records, and user `message.content` is a
+list (chiefly `tool_result` blocks) in 92.6% of records whenever a message follows a tool
+call — not the plain string the `[{"role", "content"}]` shape above implies.
+Handing a block list straight to `_summarize_messages()` breaks immediately:
+`contains_secret()`'s first step is `text.lower()`, which raises `AttributeError` on a list,
+on nearly every real session that used a tool. The adapter must flatten *before* the handoff:
+concatenate `text`-type block text into `content`; drop `tool_use`, `tool_result`, and
+`thinking` block content entirely rather than folding it in — `_summarize_messages()` itself
+only ever reads `msg["role"]`/`msg["content"]` (verified: `scripts/fetch_sessions.py`'s real
+implementation has no `tool_calls` handling at all), so a per-message `tool_calls` key would
+be dead weight the summarizer silently discards, not a field worth inventing. `thinking` is
+excluded rather than included on the same reasoning driving the drop: it restates the model's
+own reasoning about user content, and the shared redaction chokepoint exists to filter the raw
+record, not to be trusted against a paraphrase of it. This flattening happens per-message,
+inside the adapter, reducing each record to the plain `{"role", "content"}` shape
+`_summarize_messages()` actually consumes, before the handoff — the shared summarizer's
+contract (host-neutral, do-not-duplicate) is unchanged; only the adapter's job grows to
+include this step. (Tool-call-level analysis is `evaluate_tool_calls()`'s separate, DB-backed
+path — already out of scope per Scope Boundaries — not this one.) Governs R4, R5.
 
 ### KTD5. Processed-state keys get a host prefix
 
@@ -185,7 +239,22 @@ count both toward one limit.
 Store `"<host>:<session_id>"`. Reading tolerates un-prefixed keys as `hermes:` so **the 101
 existing entries in the deployed flat-dict state file keep working with no migration** —
 which matters more than tidiness here, because `CLAUDE.md` warns that another producer
-maintains that file's timestamps and it must not be rewritten. Governs R7.
+maintains that file's timestamps and it must not be rewritten.
+
+**This must land in both copies, not just `state.py`.** `CLAUDE.md` already documents that
+`fetch_sessions.py` duplicates `load_processed()`/`mark_processed()`/`prune_processed()`
+inline rather than importing `state.py` — and `fetch_sessions()`, the function the deployed
+cron path actually calls, uses only its own local copies, never `state.py`'s. Prefixing
+`state.py` alone would leave the cron path writing un-prefixed keys forever, silently
+reproducing the exact "dedup disabled" failure this repo has already hit once. The prefix
+change lands in both copies, and `tests/test_state_schema_compat.py`'s existing
+parametrization over both modules (built for exactly this drift risk) extends to cover it.
+
+The exact API shape: `load_processed(host)` strips the `"<host>:"` prefix internally and
+returns bare ids for that host only (un-prefixed legacy keys read as `hermes:`);
+`mark_processed(session_ids, host)` adds the prefix before writing. Callers pass a host and
+get bare ids back — no call site outside `state.py`/`fetch_sessions.py` builds or strips a
+prefix itself. Governs R7.
 
 ### KTD6. `--db-path` becomes `--source`, keeping the old flag as an alias
 
@@ -246,16 +315,18 @@ listed, mirroring `call_provider()`'s message.
 **Approach:** `fetch_sessions()` and `sessions_for_skill()` obtain rows via the adapter;
 `scan_skills()` delegates to `iter_skills()`; `installed_skill_body()` and
 `_installed_body()` become `get_adapter().read_skill_body(name)`; `state.py` applies the KTD5
-prefix. Keep every public signature — these are imported across modules and by ~35 test
-files.
+prefix. Keep every public signature — these are imported across modules, including the 11 of
+41 test files that monkeypatch a seam directly (see Risks for the exact list).
 
 **Patterns to follow:** the local-import-then-attribute-call convention at
-`evaluate.py:1062-1068`, documented there precisely so tests that monkeypatch
-`skill_index.scan_skills` still observe the patch. A module-scope `from host import
-get_adapter` would bind past those patches. Follow the comment, don't rediscover it.
+`evaluate.py:1103-1106` (inside `installed_skill_body()`), documented there precisely so
+tests that monkeypatch `skill_index.scan_skills` still observe the patch. A module-scope
+`from host import get_adapter` would bind past those patches. Follow the comment, don't
+rediscover it.
 
-**Execution note:** This unit's risk is not the new code, it is the ~35 test files that
-monkeypatch the old seams. Run the full suite after each file, not at the end.
+**Execution note:** This unit's risk is not the new code, it is the 11 test files that
+monkeypatch the old seams directly (plus any indirect breakage in the other 30). Run the full
+suite after each file, not at the end.
 
 **Verification:** Full suite green with `SKILL_EVOLUTION_HOST` unset. `grep -rn "\.hermes"
 scripts/` returns hits only in `host.py`.
@@ -268,19 +339,44 @@ scripts/` returns hits only in `host.py`.
 `tests/fixtures/claude_code/`.
 
 **Approach:** `iter_skills()` globs `~/.claude/skills/*/SKILL.md`, reusing
-`parse_name_description_frontmatter()` and stamping `category: "user"` (KTD3).
-`iter_sessions()` walks `~/.claude/projects/*/*.jsonl`, groups by file (one file = one
-session), and per file: `session_id` from `sessionId` (fall back to the filename stem),
-`started_at` from the first record's `timestamp`, `title` from a `custom-title` record else
-the first user message truncated, `model` from an assistant record's `message.model`,
-`source` from `entrypoint`. Map `type` → `role`, drop the four non-message types, then hand
-the list to the shared `_summarize_messages()`.
+`parse_name_description_frontmatter()`, stamping `category: "user"` (KTD3), and skipping any
+dot-prefixed skill-directory name — the flat tree has no category level to filter at, so R6's
+dot-prefix exclusion must be re-applied one level down here instead (`Path.glob()` does not
+exclude dot-prefixed entries on its own; verified live). `iter_sessions(since=...)` walks
+`~/.claude/projects/*/*.jsonl`, groups by file (one file = one session), and per file:
+`session_id` from `sessionId` (fall back to the filename stem); `started_at` from the first
+record that actually carries a `timestamp` field — scanning forward past leading records that
+don't (`custom-title`, `mode`, and similar small records commonly come first) rather than
+trusting literally the first record, since two of three real files sampled would otherwise
+read as epoch-zero and get silently dropped by any lookback filter; `title` from a
+`custom-title` record else the first user message truncated; `model` from an assistant
+record's `message.model`; `source` from `entrypoint`. Apply `since` as a cheap pre-filter
+before the full per-file parse — peek the resolved `started_at` first and skip the file
+entirely when it falls outside the window — mirroring the two-phase cheap/expensive split the
+existing SQL path already has (`SESSION_QUERY` before `MESSAGE_QUERY`), since at this
+machine's real scale (557 files, 257MB, up to 8MB each) parsing every message before filtering
+would be a measurable regression from the SQL path this is meant to match. Map `type` → `role`
+by allowlist (`user`/`assistant` only), drop everything else — including `system` and `mode`,
+which carry no `message` field and would misparse under a denylist approach. Per KTD4, each
+message's `content` is flattened before it reaches the shared summarizer: concatenate `text`
+block text into `content`, and drop `tool_use`/`tool_result`/`thinking` block content entirely
+rather than folding it in — `_summarize_messages()` has no use for anything beyond
+`role`/`content`.
 
 **Test scenarios:** happy path over a multi-record fixture; a file with no `custom-title`
 (title falls back); a malformed JSON line (skipped, warned on stderr — never aborts the
 walk); an empty file; a session whose only records are non-message types (yields nothing,
-not a zero-message session); a secret and an email in a message body (dropped / masked by the
-shared path, proving KTD4's wiring rather than re-testing the redaction itself).
+not a zero-message session); **a fixture containing `system` and `mode` records interleaved
+with real messages** (both dropped, no `KeyError` on the missing `message` field, message
+count reflects only `user`/`assistant` records — this is the scenario the original drop-list
+would have failed); **a fixture whose `message.content` is a block list** (`text`, `thinking`,
+`tool_use`, `tool_result` blocks, matching real record shape) — asserts no `AttributeError`
+from `contains_secret()`, `text` blocks concatenate into `content`, and
+`tool_use`/`tool_result`/`thinking` block content is dropped entirely rather than passed
+through; **a session whose first several records have no `timestamp` field** (`started_at` resolves
+from the first record that has one, not literally the first record); a secret and an email in
+a message body (dropped / masked by the shared path, proving KTD4's wiring rather than
+re-testing the redaction itself).
 
 **Execution note:** Start from a failing test built on a *copied, redacted* fixture, not the
 live `~/.claude/projects` tree — those transcripts are real user data and this repo's own
@@ -346,8 +442,8 @@ False` with the host named. Every `SKILL_EVOLUTION_*` var still documented (the 
 
 U1 → U2 → U3 → U4 → U5, strictly serial. U2 touches the modules U1 defines, U3 needs the
 protocol, U4 needs two adapters to compare, U5 documents the result. **Do not parallelize:**
-U2 alone rewrites the seam every one of ~35 test files monkeypatches, so a concurrent worker
-would be rebasing onto a moving target for no wall-clock gain on a five-unit plan.
+U2 alone rewrites the seam that 11 of 41 test files monkeypatch directly, so a concurrent
+worker would be rebasing onto a moving target for no wall-clock gain on a five-unit plan.
 
 ## Scope Boundaries
 
@@ -372,7 +468,7 @@ write-side guard, docs.
 
 ```bash
 # 1. No regression: the Hermes path is untouched
-python3 -m pytest -q                                    # expect 507+ passed, 1 skipped
+python3 -m pytest -q                                    # expect 533+ passed, 1 skipped
 python3 scripts/fetch_sessions.py --dry-run             # same output as before the change
 
 # 2. The seam is real
@@ -406,15 +502,22 @@ SKILL_EVOLUTION_HOST=claude_code python3 -c "..."       # can_apply: False, host
 
 ## Risks
 
-**The ~35 test files that monkeypatch the current seams.** The likeliest way this plan breaks
-is not a design error, it is `test_state_schema_compat.py` and friends patching
-`fetch_sessions.STATE_FILE` or `skill_index.scan_skills` and no longer being observed.
-Mitigation: keep public signatures, follow the local-import convention already documented at
-`evaluate.py:1062`, and run the full suite per file in U2 rather than per unit.
+**The 11 test files that monkeypatch a seam directly** (`test_evaluate_baseline_trust.py`,
+`test_evaluate_session_db_path.py`, `test_fetch_sessions_for_skill.py`,
+`test_fetch_sessions_pii.py`, `test_fetch_sessions.py`, `test_optimize_skill_objective.py`,
+`test_optimize_skill.py`, `test_robustness_gaps.py`, `test_skill_index.py`,
+`test_state_pruning.py`, `test_state_schema_compat.py`) plus whatever indirect breakage
+surfaces in the other 30. The likeliest way this plan breaks is not a design error, it is one
+of these patching `fetch_sessions.STATE_FILE` or `skill_index.scan_skills` and no longer being
+observed. Mitigation: keep public signatures, follow the local-import convention already
+documented at `evaluate.py:1103-1106`, and run the full suite per file in U2 rather than per
+unit.
 
 **Claude Code's transcript format is undocumented and versioned** (records carry a `version`
 key). It can change without notice. Mitigation: tolerate unknown record types and malformed
-lines by skipping with a stderr warning, and derive only the seven fields the contract needs —
+lines by skipping with a stderr warning, and derive only the six fields the adapter itself
+must produce (`session_id`, `started_at`, `title`, `model`, `source`, `messages` — the shared
+summarizer computes the remaining three) —
 the narrower the read, the less there is to break.
 
 **Over-abstraction.** Three methods is the whole protocol. If a fourth is needed to make
