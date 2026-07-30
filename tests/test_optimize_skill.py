@@ -11,6 +11,7 @@ import pytest
 
 import evaluate
 import fetch_sessions
+import host
 import optimize_skill
 import proposal as proposal_module
 import skill_index
@@ -1067,3 +1068,45 @@ def test_draft_passes_original_size_to_the_structural_check(tmp_path, monkeypatc
 
     with pytest.raises(ValueError, match="cumulative"):
         optimize_skill.draft_proposal_from_gepa_result("my-skill", result)
+
+
+# ── _find_skill_matches() routes through the active host adapter (U2) ──────
+# Regression coverage for a P2 finding (testing review): this host-routing change had
+# zero test coverage of its own -- existing tests only monkeypatch skill_index.scan_skills
+# directly, which is transitively still correct but never proves the adapter seam itself
+# is what's actually being called.
+
+def test_find_skill_matches_routes_through_get_adapter_not_scan_skills_directly(monkeypatch):
+    """Swap out host.get_adapter() for a fake adapter whose iter_skills() returns a
+    distinctive result that real skill_index.scan_skills() could never produce.
+    _find_skill_matches() must return matches from the fake adapter, proving it goes
+    through host.get_adapter() rather than calling skill_index.scan_skills() itself."""
+
+    class FakeAdapter:
+        def iter_skills(self):
+            return [{"name": "only-the-fake-adapter-knows-this", "category": "x",
+                      "description": "d", "path": "/nonexistent", "size": 1}]
+
+    monkeypatch.setattr(host, "get_adapter", lambda *a, **k: FakeAdapter())
+
+    matches = optimize_skill._find_skill_matches("only-the-fake-adapter-knows-this")
+
+    assert len(matches) == 1
+    assert matches[0]["name"] == "only-the-fake-adapter-knows-this"
+
+
+def test_find_skill_matches_reads_claude_code_skills_under_that_host(tmp_path, monkeypatch):
+    """End-to-end proof that switching SKILL_EVOLUTION_HOST actually changes which
+    skills _find_skill_matches() can see -- not just that some adapter seam exists."""
+    skill_dir = tmp_path / "skills" / "cc-only-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: cc-only-skill\ndescription: only on claude code\n---\n\nBody.\n"
+    )
+    monkeypatch.setenv(host.HOST_ENV_VAR, "claude_code")
+    monkeypatch.setenv(host.CLAUDE_CODE_HOME_ENV_VAR, str(tmp_path))
+
+    matches = optimize_skill._find_skill_matches("cc-only-skill")
+
+    assert len(matches) == 1
+    assert matches[0]["category"] == "user"

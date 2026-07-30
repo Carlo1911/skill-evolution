@@ -498,3 +498,56 @@ def test_since_ignores_a_stray_old_timestamp_on_a_leading_non_message_record(cla
     # record's), but the since-filter itself must have keyed off the message timestamp.
     session = results[0]
     assert session["message_count"] == 2
+
+
+# ── Additional branch coverage (testing review, P3) ─────────────────
+
+def test_numeric_timestamp_is_parsed_like_an_iso_string(claude_home):
+    """_parse_claude_code_timestamp() accepts a numeric epoch too -- exercise that
+    branch through a real record, not just the helper in isolation."""
+    path = _session_file(claude_home)
+    _write_jsonl(path, [
+        user_record("sess-numeric-ts", 1784541600, "hello"),  # epoch seconds, not a string
+    ])
+
+    adapter = host.ClaudeCodeAdapter()
+    session = list(adapter.iter_sessions())[0]
+
+    assert session["started_at"] == 1784541600.0
+    assert isinstance(session["started_at"], float)
+
+
+def test_session_id_falls_back_to_filename_stem_when_no_record_has_one(claude_home):
+    path = _session_file(claude_home, filename="fallback-session-id.jsonl")
+    _write_jsonl(path, [
+        {"type": "user", "timestamp": "2026-07-20T10:00:00Z",
+         "message": {"role": "user", "content": "hello, no sessionId anywhere"}},
+    ])
+
+    adapter = host.ClaudeCodeAdapter()
+    session = list(adapter.iter_sessions())[0]
+
+    assert session["session_id"] == "fallback-session-id"
+
+
+def test_source_is_extracted_from_an_entrypoint_field(claude_home):
+    path = _session_file(claude_home)
+    _write_jsonl(path, [
+        user_record("sess-entrypoint", "2026-07-20T10:00:00Z", "hi",
+                    extra={"entrypoint": "claude-desktop"}),
+    ])
+
+    adapter = host.ClaudeCodeAdapter()
+    session = list(adapter.iter_sessions())[0]
+
+    assert session["source"] == "claude-desktop"
+
+
+def test_iter_sessions_and_iter_skills_return_empty_when_directories_are_missing(claude_home):
+    """claude_home fixture points SKILL_EVOLUTION_CLAUDE_CODE_HOME at an empty tmp_path
+    with neither skills/ nor projects/ created -- both methods must degrade to an empty
+    result, not raise."""
+    adapter = host.ClaudeCodeAdapter()
+
+    assert list(adapter.iter_sessions()) == []
+    assert adapter.iter_skills() == []
