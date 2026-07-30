@@ -279,7 +279,7 @@ def _bare_id_for_host(key: str, host: str) -> Optional[str]:
     """
     prefix = f"{host}:"
     if key.startswith(prefix):
-        return key[len(prefix):]
+        return key.removeprefix(prefix)
     if host == DEFAULT_HOST and ":" not in key:
         return key
     return None
@@ -338,11 +338,12 @@ def mark_processed(session_ids: List[str], host: Optional[str] = None) -> None:
         resolved = _resolve_host(host)
         state: Dict[str, Any] = dict(existing)  # keep prior timestamps untouched
         for sid in session_ids:
-            if _host_key(sid, resolved) in state:
+            key = _host_key(sid, resolved)
+            if key in state:
                 continue  # already present under this host's prefixed key
             if resolved == DEFAULT_HOST and sid in state:
                 continue  # already present as a legacy bare key
-            state.setdefault(_host_key(sid, resolved), now)
+            state.setdefault(key, now)
     else:
         state = {
             "processed_sessions": list(session_ids),

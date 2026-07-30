@@ -59,15 +59,27 @@ class HostAdapter(ABC):
         """Return this host's installed-skill index: name/category/description/path/size."""
         raise NotImplementedError
 
-    @abstractmethod
     def read_skill_body(self, skill_name: str) -> Optional[str]:
         """Best-effort text of `skill_name`'s currently installed body, or None.
 
         None on no match, an ambiguous match, or a read failure -- never raise. Callers
         (e.g. the evaluation gate's baseline-size check) degrade to whatever baseline
         they already had rather than failing a gate decision on an unrelated lookup.
+
+        Concrete (not abstract): every host stores skills as a name/path pair from
+        iter_skills(), so "find the one match, open it, return None on any failure" is
+        the same lookup for any host. A subclass overrides this only if its storage
+        can't answer "read this path as text" (e.g. a future host backed by a database
+        or an API rather than a filesystem).
         """
-        raise NotImplementedError
+        matches = [s for s in self.iter_skills() if s["name"] == skill_name]
+        if len(matches) != 1:
+            return None
+        try:
+            with open(matches[0]["path"], encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return None
 
 
 # ── Registry (plain name -> instance dict, no dynamic discovery) ────
@@ -154,18 +166,9 @@ class HermesAdapter(HostAdapter):
     def iter_skills(self) -> List[Dict[str, Any]]:
         return skill_index.scan_skills()
 
-    def read_skill_body(self, skill_name: str) -> Optional[str]:
-        # Mirrors evaluate.installed_skill_body() exactly: scan_skills() called as an
-        # attribute (not `from skill_index import scan_skills`) so a test that
-        # monkeypatches skill_index.scan_skills is observed here too.
-        matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
-        if len(matches) != 1:
-            return None
-        try:
-            with open(matches[0]["path"], encoding="utf-8") as f:
-                return f.read()
-        except OSError:
-            return None
+    # read_skill_body() uses HostAdapter's concrete implementation: it calls
+    # self.iter_skills() above, which calls skill_index.scan_skills() as an attribute,
+    # so a test that monkeypatches skill_index.scan_skills is still observed.
 
 
 register_adapter("hermes", HermesAdapter())
@@ -303,43 +306,19 @@ class ClaudeCodeAdapter(HostAdapter):
             if skill_dir.name.startswith("."):
                 continue
 
-            skill_md = skill_dir / "SKILL.md"
-            if not skill_md.exists():
-                continue
-
-            try:
-                content = skill_md.read_text(encoding="utf-8")
-            except OSError:
-                continue
-
-            fields = skill_index.parse_name_description_frontmatter(content)
-            skill_name = fields.get("name", skill_dir.name)
-            description = fields.get("description", "")
-
-            results.append({
-                "name": skill_name,
-                # Constant, not derived: this host has no real category level today.
-                # "user" distinguishes ~/.claude/skills/ from a future project-level
-                # .claude/skills/ tree, out of scope for this unit.
-                "category": "user",
-                "description": description,
-                "path": str(skill_md),
-                "size": len(content),
-            })
+            # skill_index.build_skill_record() covers "no SKILL.md here"
+            # (FileNotFoundError, an OSError subclass) and any other read failure by
+            # returning None -- the same record shape scan_skills() builds for Hermes,
+            # just with a constant category instead of a derived one: this host has no
+            # real category level today. "user" distinguishes ~/.claude/skills/ from a
+            # future project-level .claude/skills/ tree, out of scope for this unit.
+            record = skill_index.build_skill_record(skill_dir / "SKILL.md", category="user")
+            if record is not None:
+                results.append(record)
 
         return results
 
-    def read_skill_body(self, skill_name: str) -> Optional[str]:
-        # Same contract as HermesAdapter.read_skill_body(): None on no match, ambiguous
-        # match, or read failure -- never raise.
-        matches = [s for s in self.iter_skills() if s["name"] == skill_name]
-        if len(matches) != 1:
-            return None
-        try:
-            with open(matches[0]["path"], encoding="utf-8") as f:
-                return f.read()
-        except OSError:
-            return None
+    # read_skill_body() uses HostAdapter's concrete implementation.
 
     # ── sessions: ~/.claude/projects/*/*.jsonl (one file per session) ──
 

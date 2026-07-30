@@ -64,9 +64,6 @@ def _write_skill(root, category, name, description="does a thing"):
     )
 
 
-ADAPTERS_UNDER_TEST = {"hermes": host.HermesAdapter}
-
-
 @pytest.mark.parametrize("host_name", ["hermes"])
 def test_iter_sessions_matches_fetch_sessions_shape(host_name, db_path):
     """Characterization: pins fetch_sessions()'s exact key set and types against a

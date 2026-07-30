@@ -338,7 +338,7 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
     # and checking here (rather than after the gate) also means a non-Hermes host never
     # appends an entry to eval_history.jsonl for a proposal it was never going to apply.
     resolved_host = host.resolve_host()
-    if resolved_host != "hermes":
+    if resolved_host != host.HermesAdapter.name:
         return {
             "can_apply": False,
             "action": proposal.type.value,

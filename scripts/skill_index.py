@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 SKILLS_DIR = os.path.expanduser("~/.hermes/skills")
@@ -37,6 +38,30 @@ def parse_name_description_frontmatter(content: str) -> dict:
     return fields
 
 
+def build_skill_record(skill_md: Path, category: str) -> Optional[dict]:
+    """Build one skill's index record from its SKILL.md path, or None if it can't be read.
+
+    Shared by scan_skills()'s category-nested walk (Hermes) and
+    host.ClaudeCodeAdapter.iter_skills()'s flat walk -- the record shape and the
+    fields-then-fallback-to-dirname logic are identical either way; only how `category`
+    is derived differs (a real directory level for Hermes, a constant for Claude Code).
+    """
+    try:
+        content = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    fields = parse_name_description_frontmatter(content)
+    name = fields.get("name", skill_md.parent.name)
+    description = fields.get("description", "")
+    return {
+        "name": name,
+        "category": category,
+        "description": description,
+        "path": str(skill_md),
+        "size": len(content),
+    }
+
+
 def scan_skills(skills_dir: str = SKILLS_DIR) -> list:
     """Scan skills directory and return structured index."""
     base = Path(skills_dir)
@@ -60,22 +85,9 @@ def scan_skills(skills_dir: str = SKILLS_DIR) -> list:
         category = category_dir.name
 
         for skill_dir in sorted(category_dir.iterdir()):
-            skill_md = skill_dir / "SKILL.md"
-            if not skill_md.exists():
-                continue
-
-            content = skill_md.read_text()
-            fields = parse_name_description_frontmatter(content)
-            name = fields.get("name", skill_dir.name)
-            description = fields.get("description", "")
-
-            results.append({
-                "name": name,
-                "category": category,
-                "description": description,
-                "path": str(skill_md),
-                "size": len(content),
-            })
+            record = build_skill_record(skill_dir / "SKILL.md", category)
+            if record is not None:
+                results.append(record)
 
     return results
 
