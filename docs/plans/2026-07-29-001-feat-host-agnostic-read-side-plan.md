@@ -307,16 +307,25 @@ listed, mirroring `call_provider()`'s message.
 
 ### U2. Route the four seams through the adapter
 
-**Goal:** No module outside `scripts/host.py` names a Hermes path.
+**Goal:** No module *other than* `scripts/host.py` and the three seam modules it wraps
+(`fetch_sessions.py`, `skill_index.py`, `state.py` — which legitimately keep their own
+Hermes-specific defaults, per KTD1) constructs a Hermes path.
 
 **Files:** `scripts/fetch_sessions.py`, `scripts/skill_index.py`, `scripts/state.py`,
 `scripts/evaluate.py`, `scripts/optimize_skill.py`.
 
 **Approach:** `fetch_sessions()` and `sessions_for_skill()` obtain rows via the adapter;
-`scan_skills()` delegates to `iter_skills()`; `installed_skill_body()` and
-`_installed_body()` become `get_adapter().read_skill_body(name)`; `state.py` applies the KTD5
-prefix. Keep every public signature — these are imported across modules, including the 11 of
-41 test files that monkeypatch a seam directly (see Risks for the exact list).
+`installed_skill_body()` becomes `get_adapter().read_skill_body(name)`;
+`_find_skill_matches()` becomes `get_adapter().iter_skills()` filtered by name (`_installed_body()`
+is adapter-backed transitively through it, unchanged itself); `state.py` and
+`fetch_sessions.py`'s own duplicate copy of `load_processed()`/`mark_processed()`/
+`prune_processed()` both apply the KTD5 prefix. **`skill_index.scan_skills()` stays as the
+canonical scan implementation and is not touched** — `HermesAdapter.iter_skills()` delegates
+*to* it (the only direction available without a circular import, since `host.py` imports
+`skill_index`); nothing outside the adapter calls `scan_skills()` directly anymore, which is
+what R3 actually requires. Keep every public signature — these are imported across modules,
+including the 11 of 41 test files that monkeypatch a seam directly (see Risks for the exact
+list).
 
 **Patterns to follow:** the local-import-then-attribute-call convention at
 `evaluate.py:1103-1106` (inside `installed_skill_body()`), documented there precisely so
@@ -328,8 +337,14 @@ rediscover it.
 monkeypatch the old seams directly (plus any indirect breakage in the other 30). Run the full
 suite after each file, not at the end.
 
-**Verification:** Full suite green with `SKILL_EVOLUTION_HOST` unset. `grep -rn "\.hermes"
-scripts/` returns hits only in `host.py`.
+**Verification:** Full suite green with `SKILL_EVOLUTION_HOST` unset. `grep -rln "\.hermes"
+scripts/ | grep -vE "scripts/(host|fetch_sessions|skill_index|state)\.py"` returns no
+matches — i.e. no module *other than* the adapter and the three seam modules it wraps
+constructs a Hermes path. (`fetch_sessions.py`/`skill_index.py`/`state.py` legitimately keep
+their own `~/.hermes/...` default constants: `HermesAdapter` delegates to their *existing*
+functions using those functions' own defaults, per KTD1/U1 — it does not inject the path
+itself. An earlier version of this line said "hits only in `host.py`", which contradicts
+that delegate-to-existing-defaults approach; this is the corrected check.)
 
 ### U3. `ClaudeCodeAdapter`
 
@@ -427,10 +442,10 @@ False` with the host named. Every `SKILL_EVOLUTION_*` var still documented (the 
 |---|---|
 | `scripts/host.py` | **new** — protocol, registry, resolver, both adapters |
 | `scripts/fetch_sessions.py` | sessions via adapter; `--source` with `--db-path` alias |
-| `scripts/skill_index.py` | `scan_skills()` delegates to `iter_skills()` |
+| `scripts/skill_index.py` | **untouched** — `HermesAdapter.iter_skills()` delegates to it, not the reverse |
 | `scripts/state.py` | host-prefixed keys, legacy keys read as `hermes:` |
 | `scripts/evaluate.py` | `installed_skill_body()` → adapter |
-| `scripts/optimize_skill.py` | `_installed_body()`, `_find_skill_matches()` → adapter |
+| `scripts/optimize_skill.py` | `_find_skill_matches()` → adapter (`_installed_body()` unchanged, adapter-backed transitively) |
 | `scripts/proposal.py` | non-Hermes host → `can_apply: False` |
 | `tests/test_host_registry.py` | **new** — U1 |
 | `tests/test_host_claude_code.py` | **new** — U3 |
@@ -471,8 +486,10 @@ write-side guard, docs.
 python3 -m pytest -q                                    # expect 533+ passed, 1 skipped
 python3 scripts/fetch_sessions.py --dry-run             # same output as before the change
 
-# 2. The seam is real
-grep -rn "\.hermes" scripts/ | grep -v "^scripts/host.py"   # expect no matches
+# 2. The seam is real -- no module OTHER than the adapter and the seam modules it wraps
+#    constructs a Hermes path (fetch_sessions.py/skill_index.py/state.py keep their own
+#    ~/.hermes/... defaults; HermesAdapter delegates to their existing functions per KTD1)
+grep -rln "\.hermes" scripts/ | grep -vE "scripts/(host|fetch_sessions|skill_index|state)\.py"   # expect no matches
 
 # 3. A second host reaches proposal-ready text with analyze.py unmodified
 SKILL_EVOLUTION_HOST=claude_code python3 scripts/skill_index.py | head
@@ -490,7 +507,8 @@ SKILL_EVOLUTION_HOST=claude_code python3 -c "..."       # can_apply: False, host
 
 1. `scripts/host.py` exists with the ABC, registry, `resolve_host()`, `HermesAdapter`, and
    `ClaudeCodeAdapter`.
-2. No module outside `scripts/host.py` names a Hermes path or the SQLite schema.
+2. No module *other than* `scripts/host.py`, `fetch_sessions.py`, `skill_index.py`, and
+   `state.py` names a Hermes path or the SQLite schema.
 3. One conformance test parametrized over both adapters asserts one shape.
 4. Redaction and PII masking run through the single shared path on both hosts.
 5. Processed state is host-namespaced and reads the deployed file's existing entries with no

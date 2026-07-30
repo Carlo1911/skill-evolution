@@ -87,7 +87,14 @@ def test_corrupt_file_yields_empty_without_raising(module, state_file):
 
 @pytest.mark.parametrize("module", MODULES, ids=IDS)
 def test_marking_preserves_the_existing_flat_dict_shape(module, state_file):
-    """Never clobber another producer's file into a different schema."""
+    """Never clobber another producer's file into a different schema.
+
+    Pre-existing legacy (un-prefixed) entries are left exactly as-is -- mark_processed()
+    never touches or reformats them. A genuinely new id, though, is written under the
+    "<host>:<id>" key (KTD5's host-prefix scheme; here host defaults to "hermes" since no
+    SKILL_EVOLUTION_HOST is set) rather than bare, which is why "new_session_1" shows up
+    on disk as "hermes:new_session_1" and load_processed() is what strips that back off.
+    """
     path = state_file(module)
     with open(path, "w") as f:
         json.dump(LEGACY, f)
@@ -97,10 +104,12 @@ def test_marking_preserves_the_existing_flat_dict_shape(module, state_file):
     with open(path) as f:
         written = json.load(f)
     assert "processed_sessions" not in written, "flat-dict file was rewritten in the other shape"
-    assert set(written) == set(LEGACY) | {"new_session_1"}
-    # pre-existing timestamps must survive untouched
+    assert set(written) == set(LEGACY) | {"hermes:new_session_1"}
+    # pre-existing timestamps must survive untouched, under their original (bare) keys
     for k, v in LEGACY.items():
         assert written[k] == v
+    # the read side transparently reunifies legacy-bare and host-prefixed entries
+    assert set(module.load_processed()) == set(LEGACY) | {"new_session_1"}
 
 
 @pytest.mark.parametrize("module", MODULES, ids=IDS)
@@ -130,3 +139,35 @@ def test_marking_a_fresh_file_uses_the_documented_shape(module, state_file):
 
 def test_both_modules_agree_on_the_state_path():
     assert state.STATE_FILE == fetch_sessions.STATE_FILE
+
+
+# ── Host-prefix separation (KTD5) ────────────────────────────────────────
+#
+# The real deployed state file has 101 legacy entries with no host prefix at all,
+# written before any host concept existed. load_processed(host="hermes") must keep
+# reading them with zero migration; a different host must not pick them up.
+
+@pytest.mark.parametrize("module", MODULES, ids=IDS)
+def test_legacy_unprefixed_entries_belong_to_hermes_only(module, state_file):
+    path = state_file(module)
+    with open(path, "w") as f:
+        json.dump(LEGACY, f)
+
+    assert set(module.load_processed(host="hermes")) == set(LEGACY)
+    assert set(module.load_processed(host="claude_code")) == set()
+
+
+@pytest.mark.parametrize("module", MODULES, ids=IDS)
+def test_mark_processed_writes_a_host_prefixed_key_for_a_non_default_host(module, state_file):
+    path = state_file(module)
+    with open(path, "w") as f:
+        json.dump(LEGACY, f)
+
+    module.mark_processed(["new_for_claude_code"], host="claude_code")
+
+    with open(path) as f:
+        written = json.load(f)
+    assert "claude_code:new_for_claude_code" in written
+    # the hermes-side legacy entries are untouched and still invisible to claude_code
+    assert set(module.load_processed(host="claude_code")) == {"new_for_claude_code"}
+    assert set(module.load_processed(host="hermes")) == set(LEGACY)

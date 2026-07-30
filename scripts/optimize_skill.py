@@ -269,10 +269,20 @@ def _find_skill_matches(skill_name: str) -> List[Dict[str, Any]]:
     Shared by run_gepa_optimization() and _resolve_baseline_size_bytes() so a future
     change to matching semantics (e.g. case-insensitivity) only needs to land once;
     each caller applies its own handling for the zero/one/many-match cases.
-    """
-    import skill_index
 
-    return [s for s in skill_index.scan_skills() if s["name"] == skill_name]
+    Goes through the active host adapter (U2) rather than calling skill_index.scan_skills()
+    directly -- this is exactly the "what skills currently exist" lookup the host seam
+    exists to contain (it's what detects the ambiguous-duplicate-name case, e.g. the
+    `.archive/` twin of a live skill).
+
+    host is imported locally and get_adapter() called as an attribute so tests that
+    monkeypatch skill_index.scan_skills (what HermesAdapter.iter_skills() calls
+    internally, the same way) are still observed; a module-scope `from host import
+    get_adapter` would bind past the patch.
+    """
+    import host
+
+    return [s for s in host.get_adapter().iter_skills() if s["name"] == skill_name]
 
 
 def run_gepa_optimization(skill_name: str, iterations: Optional[int] = None):

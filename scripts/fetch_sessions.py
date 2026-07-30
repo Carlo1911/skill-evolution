@@ -26,6 +26,13 @@ STATE_FILE_ENV_VAR = "SKILL_EVOLUTION_STATE_FILE"
 STATE_RETENTION_ENV_VAR = "SKILL_EVOLUTION_STATE_RETENTION"
 DB_PATH_ENV_VAR = "SKILL_EVOLUTION_DB_PATH"
 
+# Host-prefix support (KTD5). Mirrors host.py's HOST_ENV_VAR/DEFAULT_HOST exactly, but is
+# duplicated here rather than imported: host.py imports this module (U1's HermesAdapter
+# delegates to fetch_sessions()), so importing host.py back from here would be a cycle.
+# state.py duplicates this same pair on purpose too -- if you change one, change the other.
+HOST_ENV_VAR = "SKILL_EVOLUTION_HOST"
+DEFAULT_HOST = "hermes"
+
 # ── Secret patterns — NEVER include these in datasets ──────────────────
 SECRET_PATTERNS = [
     "sk-ant-api", "sk-or-v1-", "ghp_", "ghu_", "xoxb-", "xapp-",
@@ -240,8 +247,46 @@ def _read_state() -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def load_processed() -> List[str]:
-    """Load the set of already-processed session IDs.
+def _resolve_host(host: Optional[str] = None) -> str:
+    """Resolve the active host name: explicit arg > SKILL_EVOLUTION_HOST > default.
+
+    Duplicates host.resolve_host()'s exact resolution order rather than importing it --
+    see the HOST_ENV_VAR/DEFAULT_HOST comment above for why. state.py duplicates this
+    same helper; if you change one, change the other.
+    """
+    if host:
+        return host
+    return os.environ.get(HOST_ENV_VAR, DEFAULT_HOST)
+
+
+def _host_key(session_id: str, host: str) -> str:
+    """The on-disk key a *new* entry for `session_id` gets under `host`."""
+    return f"{host}:{session_id}"
+
+
+def _bare_id_for_host(key: str, host: str) -> Optional[str]:
+    """If `key` belongs to `host`, return its bare session id; otherwise None.
+
+    Two forms count as belonging to a host: an exactly-prefixed "<host>:<id>" key, and --
+    only for the default "hermes" host -- a legacy key with no recognised prefix at all.
+    The flat state file deployed today has 101 such legacy entries with no host prefix,
+    written before any host concept existed; treating them as implicitly "hermes:<id>"
+    is what lets load_processed(host="hermes") keep working against that file with zero
+    migration. A key prefixed for some other host (e.g. "claude_code:<id>") must NOT
+    resolve for host="hermes" -- only exactly-prefixed keys resolve for a non-default host.
+
+    Kept byte-for-byte equivalent to state.py's copy -- if you change one, change the other.
+    """
+    prefix = f"{host}:"
+    if key.startswith(prefix):
+        return key[len(prefix):]
+    if host == DEFAULT_HOST and ":" not in key:
+        return key
+    return None
+
+
+def load_processed(host: Optional[str] = None) -> List[str]:
+    """Load the set of already-processed session IDs for `host` (default: resolved host).
 
     Kept byte-for-byte equivalent to state.py's copy (this script is standalone by
     convention) -- if you change one, change the other.
@@ -251,30 +296,53 @@ def load_processed() -> List[str]:
     actually deployed today is a flat {session_id: iso_timestamp} map. Reading only the
     documented shape silently returned [] against the real file, which disabled dedup
     entirely -- every session looked unprocessed on every run.
+
+    The documented shape predates the host concept and is not host-scoped -- it is only
+    ever produced fresh by mark_processed() (see below), so there is nothing to
+    disambiguate there yet. Host scoping applies to the flat-map shape, which is the one
+    actually deployed and growing.
     """
+    resolved = _resolve_host(host)
     data = _read_state()
     if data is None:
         return []
     if "processed_sessions" in data:
         return data.get("processed_sessions") or []
-    # Flat {session_id: timestamp} map: the keys *are* the processed ids.
-    return [k for k in data if k != "last_analyzed_at" and k != "version"]
+    # Flat {session_id: timestamp} map: filter+strip to this host's bare ids.
+    ids = []
+    for k in data:
+        if k in ("last_analyzed_at", "version"):
+            continue
+        bare = _bare_id_for_host(k, resolved)
+        if bare is not None:
+            ids.append(bare)
+    return ids
 
 
-def mark_processed(session_ids: List[str]) -> None:
-    """Mark sessions as processed, preserving whichever shape the file already uses.
+def mark_processed(session_ids: List[str], host: Optional[str] = None) -> None:
+    """Mark sessions as processed for `host`, preserving whichever shape the file uses.
 
     Rewriting a flat-dict file into the documented shape would discard the timestamps
     another producer maintains, so the existing layout wins; only a fresh file gets the
-    documented shape.
+    documented shape (which stays host-agnostic -- see load_processed()).
+
+    On the flat-map shape, a genuinely new entry is written under the "<host>:<id>" key
+    (KTD5) -- but an id already covered by an existing entry for this host (a legacy bare
+    key when host == "hermes", or an already-prefixed key) is left exactly as-is; this
+    never touches or reformats a pre-existing entry, it only adds ones that are missing.
     """
     now = datetime.now(timezone.utc).isoformat()
     existing = _read_state()
 
     if existing is not None and "processed_sessions" not in existing:
+        resolved = _resolve_host(host)
         state: Dict[str, Any] = dict(existing)  # keep prior timestamps untouched
         for sid in session_ids:
-            state.setdefault(sid, now)
+            if _host_key(sid, resolved) in state:
+                continue  # already present under this host's prefixed key
+            if resolved == DEFAULT_HOST and sid in state:
+                continue  # already present as a legacy bare key
+            state.setdefault(_host_key(sid, resolved), now)
     else:
         state = {
             "processed_sessions": list(session_ids),
@@ -305,9 +373,10 @@ def _parse_state_retention(raw: Optional[str]):
     return ("count", int(value))
 
 
-def prune_processed(retention: Optional[str] = None, keep_ids: Optional[List[str]] = None) -> None:
+def prune_processed(retention: Optional[str] = None, keep_ids: Optional[List[str]] = None,
+                    host: Optional[str] = None) -> None:
     """Prune old entries from the flat {id: timestamp} state-file shape per
-    SKILL_EVOLUTION_STATE_RETENTION.
+    SKILL_EVOLUTION_STATE_RETENTION, scoped to `host`'s own entries.
 
     A no-op, with a stderr warning, for the documented {"processed_sessions": [...]} shape:
     that shape carries no per-session timestamp, and its list order isn't chronological
@@ -316,6 +385,12 @@ def prune_processed(retention: Optional[str] = None, keep_ids: Optional[List[str
     schema change, which this deliberately does not attempt (see CLAUDE.md's caution
     against reshaping the deployed file's semantics without confirming who else depends on
     it). Pruning is real only for the shape that is actually growing in production.
+
+    Only entries belonging to the resolved host (bare legacy keys for "hermes", or
+    exactly-prefixed "<host>:<id>" keys) are eligible for pruning -- entries belonging to
+    a different host pass through untouched, exactly like last_analyzed_at/version already
+    do. `keep_ids` is matched against each entry's *bare* id, not its on-disk key, since
+    mark_processed() may have written it under a "<host>:<id>" key.
 
     `keep_ids` is always retained regardless of the configured limit. This is not a
     defensive nicety -- it is structurally required: mark_processed() computes now() once
@@ -354,28 +429,38 @@ def prune_processed(retention: Optional[str] = None, keep_ids: Optional[List[str
         )
         return
 
+    resolved = _resolve_host(host)
     passthrough = {k: v for k, v in existing.items() if k in ("last_analyzed_at", "version")}
-    session_items = [(k, v) for k, v in existing.items() if k not in ("last_analyzed_at", "version")]
+    other_host_items = []  # (key, value) pairs belonging to a different host -- untouched
+    session_items = []  # (key, value, bare_id) pairs belonging to the resolved host
+    for k, v in existing.items():
+        if k in ("last_analyzed_at", "version"):
+            continue
+        bare = _bare_id_for_host(k, resolved)
+        if bare is None:
+            other_host_items.append((k, v))
+        else:
+            session_items.append((k, v, bare))
 
     kind, limit = rule
     if kind == "count":
         # No defined tiebreak among entries sharing a timestamp (an entire run's batch
         # does), so this only meaningfully orders entries across *different* runs --
         # keep_ids below is what actually protects a single run's own batch.
-        ordered = sorted(session_items, key=lambda kv: kv[1], reverse=True)
+        ordered = sorted(session_items, key=lambda kvb: kvb[1], reverse=True)
         survivors = ordered[:max(int(limit), 0)]
     else:
         cutoff = datetime.now(timezone.utc).timestamp() - (limit * 86400)
         survivors = []
         malformed = []
-        for k, v in session_items:
+        for k, v, bare in session_items:
             try:
                 ts = datetime.fromisoformat(v).timestamp()
             except (ValueError, TypeError):
                 ts = 0
                 malformed.append(k)
             if ts >= cutoff:
-                survivors.append((k, v))
+                survivors.append((k, v, bare))
         if malformed:
             shown = ", ".join(malformed[:5])
             tail = f" ...and {len(malformed) - 5} more" if len(malformed) > 5 else ""
@@ -385,16 +470,20 @@ def prune_processed(retention: Optional[str] = None, keep_ids: Optional[List[str
                 file=sys.stderr,
             )
 
-    survivor_ids = {k for k, v in survivors}
-    for k, v in session_items:
-        if k in keep_ids and k not in survivor_ids:
-            survivors.append((k, v))
-            survivor_ids.add(k)
+    survivor_keys = {k for k, v, b in survivors}
+    for k, v, bare in session_items:
+        if bare in keep_ids and k not in survivor_keys:
+            survivors.append((k, v, bare))
+            survivor_keys.add(k)
 
     if len(survivors) == len(session_items):
-        return  # nothing actually pruned -- don't touch the file
+        return  # nothing actually pruned for this host -- don't touch the file
 
-    new_state = {**passthrough, **dict(survivors)}
+    new_state = {
+        **passthrough,
+        **{k: v for k, v in other_host_items},
+        **{k: v for k, v, b in survivors},
+    }
     path = get_state_file()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -461,7 +550,8 @@ def fetch_sessions(
     dry_run: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fetch recent unprocessed sessions from state.db."""
-    processed = set(load_processed())
+    resolved_host = _resolve_host()
+    processed = set(load_processed(host=resolved_host))
     cutoff = datetime.now(timezone.utc).timestamp() - (lookback_hours * 3600)
 
     conn = sqlite3.connect(db_path)
@@ -516,7 +606,7 @@ def fetch_sessions(
     # Mark as processed
     just_processed = {s["session_id"] for s in results}
     new_processed = list(processed | just_processed)
-    mark_processed(new_processed)
+    mark_processed(new_processed, host=resolved_host)
 
     # Auto-prune, mirroring evaluate.py's SKILL_EVOLUTION_HISTORY_RETENTION: a no-op unless
     # SKILL_EVOLUTION_STATE_RETENTION is configured. `keep_ids` protects this run's own
@@ -524,7 +614,7 @@ def fetch_sessions(
     # structurally required, not just cautious. Placed after the dry-run return (like
     # mark_processed() itself) so a dry run never prunes either.
     _warn_if_state_retention_below_lookback(lookback_hours)
-    prune_processed(keep_ids=just_processed)
+    prune_processed(keep_ids=just_processed, host=resolved_host)
 
     return results
 
@@ -702,9 +792,10 @@ def main():
         # reporting to stderr rather than stdout: unlike evaluate.py, this script's stdout
         # is the NDJSON channel other tooling parses (nothing but fetch_sessions.py may
         # write to stdout), so a manual maintenance report cannot share that stream.
-        before = len(load_processed())
-        prune_processed()
-        after = len(load_processed())
+        resolved_host = _resolve_host()
+        before = len(load_processed(host=resolved_host))
+        prune_processed(host=resolved_host)
+        after = len(load_processed(host=resolved_host))
         print(f"Pruned state: {before} -> {after} processed session ids", file=sys.stderr)
         return
 

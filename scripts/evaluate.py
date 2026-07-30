@@ -1098,22 +1098,19 @@ def installed_skill_body(skill_name: str) -> Optional[str]:
     Returns None rather than raising when the skill cannot be resolved -- no match, an
     ambiguous match across categories (the `.archive/` twin case skill_index guards
     against), or a read failure -- so callers degrade to whatever baseline they already
-    had instead of failing a gate decision on an unrelated lookup.
+    had instead of failing a gate decision on an unrelated lookup. That best-effort
+    contract now lives in HostAdapter.read_skill_body() (U2) -- this is a thin wrapper
+    over the active host's adapter rather than skill_index directly, so the gate reads
+    skills through the same host seam as everything else in the pipeline.
 
-    skill_index is imported locally and scan_skills() is called as an attribute so tests
-    that monkeypatch skill_index.scan_skills are observed; a module-scope
-    `from skill_index import scan_skills` would bind past the patch.
+    host is imported locally and get_adapter() called as an attribute so tests that
+    monkeypatch skill_index.scan_skills (what HermesAdapter.read_skill_body() calls
+    internally, the same way) are still observed; a module-scope `from host import
+    get_adapter` would bind past the patch.
     """
-    import skill_index
+    import host
 
-    matches = [s for s in skill_index.scan_skills() if s["name"] == skill_name]
-    if len(matches) != 1:
-        return None
-    try:
-        with open(matches[0]["path"], encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return None
+    return host.get_adapter().read_skill_body(skill_name)
 
 
 def _resolve_baseline(proposal: Any, content_kind: str, claimed: Optional[str]) -> Optional[str]:

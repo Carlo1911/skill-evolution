@@ -191,3 +191,28 @@ def test_prune_on_missing_file_is_a_noop(module, state_file):
     state_file(module)  # points STATE_FILE at a path that doesn't exist yet
     module.prune_processed(retention="1")  # must not raise or create the file
     assert not os.path.exists(state_file.path)
+
+
+@pytest.mark.parametrize("module", MODULES, ids=IDS)
+def test_prune_only_touches_the_resolved_hosts_own_entries(module, state_file):
+    """A shared state file can carry entries for more than one host (KTD5's prefix
+    scheme). Pruning host="hermes" must never drop or even consider a "claude_code:"
+    entry, and vice versa -- each host's retention window is independent."""
+    path = state_file(module)
+    cc_old_ts = "2020-01-01T00:00:00+00:00"
+    cc_recent_ts = _iso(1)
+    _write(path, {
+        "hermes_old": _iso(100),          # legacy-bare -> belongs to hermes
+        "claude_code:cc_old": cc_old_ts,  # belongs to claude_code -- also ancient
+        "claude_code:cc_recent": cc_recent_ts,
+    })
+
+    module.prune_processed(retention="30d", host="hermes")
+
+    written = _read(path)
+    # hermes's own ancient entry is pruned...
+    assert "hermes_old" not in written
+    # ...but claude_code's entries -- ancient or not -- are left completely untouched,
+    # since they're out of scope for a host="hermes" prune call.
+    assert written["claude_code:cc_old"] == cc_old_ts
+    assert written["claude_code:cc_recent"] == cc_recent_ts
