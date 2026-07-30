@@ -17,9 +17,12 @@ the codebase to go through `get_adapter()` instead of importing those modules di
 is a later unit's job, as is a second adapter for a non-Hermes host.
 """
 
+import json
 import os
+import sys
 from abc import ABC, abstractmethod
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import fetch_sessions
@@ -166,3 +169,346 @@ class HermesAdapter(HostAdapter):
 
 
 register_adapter("hermes", HermesAdapter())
+
+
+# ── Claude Code adapter (U3) ─────────────────────────────────────────
+# Reads sessions/skills from Claude Code's on-disk layout instead of Hermes's SQLite
+# state.db + ~/.hermes/skills/<category>/<skill>/ tree:
+#   - skills:  ~/.claude/skills/*/SKILL.md          (flat -- no category level)
+#   - sessions: ~/.claude/projects/*/*.jsonl         (one JSONL file per session)
+#
+# The JSONL record format is undocumented and versioned, so every field extraction below
+# is best-effort and defensive by construction (allowlist role mapping, missing-field
+# fallbacks, never raising on a malformed line) rather than assuming a fixed schema.
+
+CLAUDE_CODE_HOME_ENV_VAR = "SKILL_EVOLUTION_CLAUDE_CODE_HOME"
+
+# How much of a fallback-derived title (first user message, no custom-title record) to
+# keep after redaction -- mirrors fetch_sessions._summarize_messages()'s content_preview
+# cap in spirit, just much shorter since a title is a one-line label, not evidence text.
+TITLE_FALLBACK_MAX_CHARS = 100
+
+
+def _default_claude_code_home() -> str:
+    """`~/.claude`, resolved at call time (not baked into a module constant at import) so
+    a test's monkeypatched HOME env var is honoured on every call, the same way
+    fetch_sessions.get_state_file()/get_state_db_path() re-read their env var at call
+    time rather than freezing it at import."""
+    return os.path.expanduser("~/.claude")
+
+
+def _resolve_claude_code_home() -> str:
+    """Resolve the Claude Code home directory: SKILL_EVOLUTION_CLAUDE_CODE_HOME > `~/.claude`.
+
+    Same call-time-env-read shape as fetch_sessions.get_state_file(): read at call time,
+    blank ignored, so a test or an isolated run can redirect this adapter's root without
+    monkeypatching HOME itself.
+    """
+    return os.environ.get(CLAUDE_CODE_HOME_ENV_VAR, "").strip() or _default_claude_code_home()
+
+
+def _parse_claude_code_timestamp(value: Any) -> Optional[float]:
+    """Best-effort epoch-seconds parse of a Claude Code record's `timestamp` field.
+
+    Accepts a numeric epoch or an ISO-8601 string (normalizing a trailing `Z`, which
+    datetime.fromisoformat() does not accept on Python versions before 3.11). Returns
+    None on anything unparseable -- callers must treat that as "unknown", not "too old":
+    excluding a session because its timestamp failed to parse would silently drop real
+    history, which is worse than occasionally not pre-filtering it.
+    """
+    if isinstance(value, bool):
+        return None  # bool is an int subclass; not a plausible timestamp
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        v = value.strip()
+        if not v:
+            return None
+        if v.endswith("Z"):
+            v = v[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(v).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _flatten_claude_code_content(content: Any) -> str:
+    """Flatten a Claude Code message's `content` into a plain string.
+
+    `content` is very often a list of typed blocks (`text`, `thinking`, `tool_use`,
+    `tool_result`), not a plain string -- this is the common case in real transcripts,
+    not an edge case. Only `text` blocks contribute to the result; `thinking`, `tool_use`,
+    and `tool_result` block content is dropped entirely -- never folded into the
+    concatenated text, never stashed anywhere else in the output either. A `content` that
+    is already a plain string passes through unchanged.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if text:
+                    parts.append(text)
+        return "".join(parts)
+    return ""
+
+
+def _role_for_claude_code_type(record_type: Any) -> Optional[str]:
+    """Map a record's `type` to a message role, by ALLOWLIST.
+
+    Only "user" and "assistant" map to a message. Every other type seen in practice
+    (`attachment`, `custom-title`, `last-prompt`, `queue-operation`, `system`, `mode`) --
+    and any future/undocumented type this format grows -- maps to None (not a message) by
+    simply not appearing on this list. A denylist of known-bad types would misparse any
+    new type as a message the moment the format adds one; an allowlist cannot.
+    """
+    if record_type == "user":
+        return "user"
+    if record_type == "assistant":
+        return "assistant"
+    return None
+
+
+class ClaudeCodeAdapter(HostAdapter):
+    """Reads sessions/skills from Claude Code's on-disk layout (`~/.claude/`).
+
+    Both iter_sessions() and iter_skills() route through the shared redaction chokepoint
+    (fetch_sessions.contains_secret()/redact_pii()/_summarize_messages()) rather than
+    reimplementing any of it -- see CLAUDE.md's "Secrets and PII are handled differently,
+    on purpose" for why a duplicate implementation here would be a correctness risk, not
+    just style debt.
+    """
+
+    name = "claude_code"
+
+    # ── skills: ~/.claude/skills/*/SKILL.md (flat, no category level) ──
+
+    def iter_skills(self) -> List[Dict[str, Any]]:
+        base = Path(_resolve_claude_code_home()) / "skills"
+        if not base.exists():
+            return []
+
+        results = []
+        for skill_dir in sorted(base.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            # Path.iterdir()/glob() do not exclude dot-prefixed entries the way a shell
+            # glob does. skill_index.scan_skills() filters dot-prefixed dirs at the
+            # *category* level for Hermes (.archive/, .curator_backups/, .hub/); this
+            # host has no category level, so the equivalent filter is re-applied one
+            # level down, at the skill-directory level.
+            if skill_dir.name.startswith("."):
+                continue
+
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+            except OSError:
+                continue
+
+            fields = skill_index.parse_name_description_frontmatter(content)
+            skill_name = fields.get("name", skill_dir.name)
+            description = fields.get("description", "")
+
+            results.append({
+                "name": skill_name,
+                # Constant, not derived: this host has no real category level today.
+                # "user" distinguishes ~/.claude/skills/ from a future project-level
+                # .claude/skills/ tree, out of scope for this unit.
+                "category": "user",
+                "description": description,
+                "path": str(skill_md),
+                "size": len(content),
+            })
+
+        return results
+
+    def read_skill_body(self, skill_name: str) -> Optional[str]:
+        # Same contract as HermesAdapter.read_skill_body(): None on no match, ambiguous
+        # match, or read failure -- never raise.
+        matches = [s for s in self.iter_skills() if s["name"] == skill_name]
+        if len(matches) != 1:
+            return None
+        try:
+            with open(matches[0]["path"], encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    # ── sessions: ~/.claude/projects/*/*.jsonl (one file per session) ──
+
+    def iter_sessions(self, since: Optional[datetime] = None) -> Iterable[Dict[str, Any]]:
+        since_epoch = since.timestamp() if since is not None else None
+        projects_dir = Path(_resolve_claude_code_home()) / "projects"
+        if not projects_dir.exists():
+            return []
+
+        results = []
+        for jsonl_path in sorted(projects_dir.glob("*/*.jsonl")):
+            if since_epoch is not None:
+                # Cheapest possible pre-filter, before opening the file at all: a
+                # session's JSONL file is only ever appended to as the session
+                # progresses, so its mtime is always >= every record's timestamp inside
+                # it. If the file hasn't been touched since before the cutoff, nothing
+                # inside it can be newer than the cutoff either.
+                try:
+                    if jsonl_path.stat().st_mtime < since_epoch:
+                        continue
+                except OSError:
+                    pass  # can't stat it; fall through and let the real parse decide
+
+            try:
+                session = self._parse_session_file(jsonl_path, since_epoch)
+            except OSError as e:
+                print(f"warning: could not read {jsonl_path}: {e}", file=sys.stderr)
+                continue
+            if session is not None:
+                results.append(session)
+
+        return results
+
+    def _parse_session_file(
+        self, path: Path, since_epoch: Optional[float]
+    ) -> Optional[Dict[str, Any]]:
+        """Parse one session's JSONL file into a session dict, or None to signal "skip
+        this file entirely" -- either it had zero parseable records (a genuinely empty
+        file corresponds to no session ever having happened, not a zero-message one), or
+        its resolved started_at fell outside `since_epoch` (the second, finer-grained
+        pre-filter layer -- see iter_sessions()'s mtime check for the first).
+        """
+        session_id = None
+        started_at = None
+        title_from_custom = None
+        model = ""
+        source = ""
+        messages: List[Dict[str, str]] = []
+        first_user_content = None
+        saw_any_record = False
+
+        for record in self._iter_jsonl_records(path):
+            saw_any_record = True
+            if not isinstance(record, dict):
+                continue
+
+            rtype = record.get("type")
+
+            if session_id is None:
+                sid = record.get("sessionId")
+                if sid:
+                    session_id = sid
+
+            if started_at is None and "timestamp" in record:
+                # Scan forward past leading records that lack a timestamp (small
+                # records like custom-title/mode commonly come first) -- this is the
+                # first record that actually HAS one, not literally record zero.
+                started_at = record["timestamp"]
+                epoch = _parse_claude_code_timestamp(started_at)
+                # Mirrors the SQL path filtering by started_at before ever fetching
+                # message bodies: stop reading the rest of this file as soon as we know
+                # it's out of window, rather than parsing every remaining message first.
+                if since_epoch is not None and epoch is not None and epoch < since_epoch:
+                    return None
+
+            if rtype == "custom-title" and title_from_custom is None:
+                candidate = (
+                    record.get("title")
+                    or record.get("customTitle")
+                    or record.get("value")
+                )
+                if candidate:
+                    title_from_custom = str(candidate)
+
+            if not source:
+                entrypoint = record.get("entrypoint")
+                if entrypoint:
+                    source = str(entrypoint)
+
+            role = _role_for_claude_code_type(rtype)
+            if role is None:
+                continue  # not a message: attachment/custom-title/system/mode/etc.
+
+            message = record.get("message")
+            if not isinstance(message, dict):
+                message = {}
+
+            if role == "assistant" and not model:
+                m = message.get("model")
+                if m:
+                    model = str(m)
+
+            content = _flatten_claude_code_content(message.get("content", ""))
+            if role == "user" and first_user_content is None:
+                first_user_content = content
+
+            messages.append({"role": role, "content": content})
+
+        if not saw_any_record:
+            return None  # genuinely empty file: no session ever happened here
+
+        if session_id is None:
+            session_id = path.stem
+
+        title = title_from_custom if title_from_custom is not None else self._fallback_title(first_user_content)
+
+        # Reuse the shared summarizer directly rather than reimplementing truncation,
+        # secret-dropping, or PII-masking -- it only ever reads msg["role"]/msg["content"],
+        # which is exactly the flattened shape built above.
+        msg_summary, user_msgs, asst_msgs = fetch_sessions._summarize_messages(messages)
+
+        return {
+            "session_id": session_id,
+            "started_at": started_at,
+            "title": title,
+            "model": model,
+            "source": source,
+            "message_count": len(messages),
+            "user_messages": user_msgs,
+            "assistant_messages": asst_msgs,
+            "messages": msg_summary,
+        }
+
+    @staticmethod
+    def _fallback_title(first_user_content: Optional[str]) -> str:
+        """Title fallback when no custom-title record exists: the first user message's
+        content, truncated -- but only after the same redaction discipline every other
+        message body gets. This path bypasses _summarize_messages() entirely (a title
+        isn't a message), so without this it would leak a secret or PII straight into
+        the session dict's `title` field, unredacted, in a way no other code path checks.
+        """
+        if not first_user_content:
+            return ""
+        if fetch_sessions.contains_secret(first_user_content):
+            return "[redacted: title source contained a secret]"
+        masked = fetch_sessions.redact_pii(first_user_content)
+        return masked[:TITLE_FALLBACK_MAX_CHARS]
+
+    @staticmethod
+    def _iter_jsonl_records(path: Path):
+        """Yield parsed JSON records from a JSONL file, one per line.
+
+        A malformed JSON line is skipped with a stderr warning -- it must never abort
+        the rest of the file's walk, since one bad line from an interrupted write
+        shouldn't cost an entire session's worth of otherwise-valid history.
+        """
+        with open(path, encoding="utf-8") as f:
+            for lineno, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError as e:
+                    print(
+                        f"warning: {path}:{lineno}: malformed JSON line skipped ({e})",
+                        file=sys.stderr,
+                    )
+                    continue
+
+
+register_adapter("claude_code", ClaudeCodeAdapter())
