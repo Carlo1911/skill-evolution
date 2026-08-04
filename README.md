@@ -6,6 +6,32 @@ Reads past sessions, analyzes them against loaded skills, generates structured p
 
 **No daemons. No external services. No GPU.** Just your host agent, a scheduled job, and Python stdlib.
 
+## Minimum Configuration
+
+Everything below has a sane default, but two things are **not optional** if you want the
+pipeline to actually work end to end rather than silently doing nothing or getting stuck:
+
+| Variable | Required when | Why |
+|---|---|---|
+| `SKILL_EVOLUTION_HOST` | You're on anything other than Hermes | Defaults to `hermes`. There is no auto-detection — running on Claude Code without setting this to `claude_code` reads (and would try to write) the wrong host's session DB and skills tree. |
+| A provider credential (`ANTHROPIC_API_KEY` by default, or the key matching `SKILL_EVOLUTION_PROVIDER`) | Always, unless you only ever run `deterministic`-only evaluation | The evaluation gate's `llm_judge` (part of the default evaluator set) fails **closed** without a working provider — every proposal will fail the gate forever, even after you approve it, with no error beyond "gate failed" in the result. |
+
+Everything else is optional and only needs to be set to change a default:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SKILL_EVOLUTION_REPO` | current working directory | Where a cron job finds `scripts/` |
+| `SKILL_EVOLUTION_PROPOSALS_DIR` | `./proposals/` | Where proposal files are read/written |
+| `SKILL_EVOLUTION_AUTO_APPLY` / `SKILL_EVOLUTION_MIN_CONFIDENCE` | off / `0.85` | Read by *your* apply step, not by the scripts themselves — see "Auto-Apply" below |
+| `SKILL_EVOLUTION_EVALUATORS` | `deterministic,llm_judge,regression` | Which evaluators the gate runs |
+| `SKILL_EVOLUTION_GATE_STRICTNESS` | `strict` | `strict` (all must pass) or `majority` |
+| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude` / `ollama` / `opencode` / `openai` / `gemini` |
+| `SKILL_EVOLUTION_CLAUDE_CODE_HOME` | `~/.claude` | Only read when `SKILL_EVOLUTION_HOST=claude_code` |
+| `SKILL_EVOLUTION_HISTORY_PATH` | `./eval_history.jsonl` | Evaluation history file |
+
+See `CLAUDE.md` and `SKILL.md` for the full list — this table is the minimum you need to
+read before your first run, not an exhaustive reference.
+
 ## Quick Start
 
 **Hermes:**
@@ -40,6 +66,60 @@ export SKILL_EVOLUTION_AUTO_APPLY=true
 export SKILL_EVOLUTION_MIN_CONFIDENCE=0.85
 ```
 
+## Usage Example
+
+A full manual walkthrough on Claude Code, from "do I have anything new to analyze" to
+"a proposal is actually applied." This mirrors what a scheduled job automates, one step
+at a time.
+
+```bash
+# 0. Configure the host and a provider for the evaluation gate (see "Minimum Configuration")
+export SKILL_EVOLUTION_HOST=claude_code
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 1. Check how many unprocessed sessions exist, without marking anything as processed
+python3 scripts/fetch_sessions.py --dry-run --lookback-hours 72
+# → "14 unprocessed sessions found"
+
+# 2. In a Claude Code session with the skill loaded, ask:
+#    "Run skill evolution analysis on my recent sessions"
+#
+# Under the hood, that prompt runs the same pipeline this repo ships as scripts —
+# fetch_sessions.py's output formatted by analyze.py, plus skill_index.py's skill
+# index — and feeds both to the host agent's own reasoning (the LLM analysis step
+# is not a script in this repo; the agent performs it directly):
+python3 scripts/fetch_sessions.py --lookback-hours 72 | python3 scripts/analyze.py > /tmp/sessions.txt
+python3 scripts/skill_index.py > /tmp/skills.json
+# The agent then writes one proposal file per finding into ./proposals/, and marks
+# those sessions processed.
+
+# 3. Inspect what got proposed
+python3 scripts/proposal.py --list
+python3 scripts/proposal.py --show 20260804-001
+
+# 4. Review the proposal file and, if you agree with it, approve it by hand:
+#    edit proposals/20260804-001.md, change `status: proposed` to `status: approved`
+
+# 5. Apply it. There is no CLI for this on purpose — apply_proposal() is meant to be
+#    invoked by a human or by a step you write, never by the analysis session itself.
+#    This call runs the full evaluation gate first and only mutates the skill if it passes:
+python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from proposal import load_proposal, apply_proposal
+p = load_proposal('proposals/20260804-001.md')
+result = apply_proposal(p, min_confidence=0.85)
+print('can_apply:', result['can_apply'])
+print('reason:', result.get('reason', result.get('evaluation_results')))
+"
+```
+
+What `can_apply` means depends on the host: on Claude Code, `True` means the skill file
+was already rewritten on disk (`applied_by: direct`); on Hermes, `True` means the result
+carries `skill_manage` instruction dicts that a separate agent step still has to execute
+(`applied_by: agent`) — `apply_proposal()` never calls `skill_manage` itself. `False` means
+the gate failed (check `evaluation_results` for which evaluator), the host can't write
+skills, or the proposal itself is invalid (e.g. a `create_new` with a placeholder body).
+
 ## Scheduled Runs
 
 This repo doesn't ship a ready-made cron/job prompt — that's operator-specific (how you
@@ -73,6 +153,7 @@ skill-evolution/
 │   ├── skill-evolution-fetch.sh # Cron wrapper (Hermes)
 │   └── skill-quality-report.sh # Cron wrapper for quality reports
 └── tests/                      # pytest suite (one file per evaluator/feature area)
+```
 
 ## How It Works
 

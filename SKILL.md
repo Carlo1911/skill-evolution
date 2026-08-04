@@ -24,6 +24,23 @@ session analyzer are written in host-agnostic language and use the env vars
 No daemons. No external services. No GPU. Just your host agent, a scheduled job, and a
 few Python scripts.
 
+## Minimum Configuration
+
+The full knob list lives in "Evaluation Environment Variables" below, but two things are
+**not optional** — skip either one and the pipeline runs without erroring while quietly
+doing the wrong thing:
+
+- **`SKILL_EVOLUTION_HOST`** — defaults to `hermes`. There is no auto-detection: on
+  Claude Code, forgetting to set this to `claude_code` means every read (and any write)
+  targets Hermes's session DB and skills tree instead of `~/.claude`.
+- **A provider credential** for the evaluation gate — `ANTHROPIC_API_KEY` by default
+  (`SKILL_EVOLUTION_PROVIDER=claude`), or the key matching whichever provider you pick
+  instead. Without one, `llm_judge` fails **closed** on every call, which means the gate
+  fails on every proposal forever — even after you set `status: approved` by hand. There
+  is no error message pointing back at this; the gate just never passes.
+
+Everything else has a default you can leave alone for a first run.
+
 ## How It Works
 
 ```
@@ -125,6 +142,26 @@ step you write) runs afterwards; the gate then re-scores the proposal and only e
 mutation instructions if it passes. On Hermes, those instructions are `skill_manage`
 calls; on Claude Code, they are direct file writes. Nothing in this repo invokes that
 step for you.
+
+There is no CLI for this step on purpose — invoke it directly:
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from proposal import load_proposal, apply_proposal
+p = load_proposal('proposals/20260804-001.md')
+result = apply_proposal(p, min_confidence=0.85)
+print('can_apply:', result['can_apply'])
+print('reason:', result.get('reason', result.get('evaluation_results')))
+"
+```
+
+`can_apply: True` means different things per host: on Claude Code the skill file was
+already rewritten (`applied_by: direct`); on Hermes the result carries `skill_manage`
+instruction dicts a separate agent step still has to execute (`applied_by: agent`) —
+`apply_proposal()` never calls `skill_manage` itself. `False` means the gate failed
+(check `evaluation_results`), the host can't write skills, or the proposal itself is
+invalid (e.g. a `create_new` with a placeholder body).
 
 ## Scheduled Runs (Cron)
 
@@ -409,6 +446,7 @@ raising out of whichever component reads it first.
 | Problem | Likely fix |
 |---------|-----------|
 | "No sessions found" | Check that the host adapter sees your session database: `hermes sessions list` (Hermes) or look under `~/.claude/projects/` (Claude Code) |
+| A proposal stays `proposed` forever, even after you approve it | Check that a provider credential is set (`ANTHROPIC_API_KEY` by default) — without one, `llm_judge` fails closed on every call and the gate never passes. Run `python3 scripts/evaluate.py --list-evaluators` to see the resolved set, or drop `llm_judge` from `SKILL_EVOLUTION_EVALUATORS` if you only want the deterministic checks |
 | Cron timeout 3600s / script auto-recurses | `scripts/skill-evolution-fetch.sh` must exec `fetch_sessions.py` found relative to its own location — if your deployed wrapper instead execs a copy of itself (e.g. a self-referential install script), you get an infinite `exec` loop until the job times out. Fix: make sure the deployed wrapper matches this repo's `scripts/skill-evolution-fetch.sh` |
 | Proposals feel low quality | Try a stronger model in the cron job |
 | Script won't import | Check the path: Python can't import from directories with hyphens |
