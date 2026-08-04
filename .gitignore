@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Anchored (see CLAUDE.md "Git tracking"): a bare `.venv/` would also match any
+# nested directory of that name.
+/.venv/
+
+*.egg-info/
+
+/proposals
+/reports
+/docs
+eval_history.jsonl

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-evolution"
+version = "1.0.0"
+description = "Host-agnostic autonomous skill improvement — analyze agent sessions, generate structured proposals, and auto-apply high-confidence changes"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+keywords = ["agent", "skills", "evolution", "self-improvement", "pipeline"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+optimizer = [
+    "gepa==0.1.4",
+]
+embeddings = [
+    "fastembed>=0.2.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
