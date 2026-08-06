@@ -1,5 +1,9 @@
 # Skill Evolution
 
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![Hosts: Hermes + Claude Code](https://img.shields.io/badge/hosts-Hermes%20%2B%20Claude%20Code-blueviolet)](docs)
+
 Autonomous self-improvement for your agent skills.
 
 Reads past sessions, analyzes them against loaded skills, generates structured proposals, and optionally auto-applies high-confidence improvements. Host-agnostic: ships adapters for **Hermes** and **Claude Code**, with an extensible `HostAdapter` interface for new hosts.
