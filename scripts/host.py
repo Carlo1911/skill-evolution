@@ -69,8 +69,15 @@ class HostAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def iter_skills(self) -> List[Dict[str, Any]]:
-        """Return this host's installed-skill index: name/category/description/path/size."""
+    def iter_skills(self, extra_roots: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Return this host's installed-skill index: name/category/description/path/size.
+
+        `extra_roots` optionally adds external skill roots (e.g. a Hermes
+        `skills.external_dirs` entry like `~/.agents/skills/`) so the index can cover
+        skills beyond the host's own tree. Hosts that have no concept of extra roots
+        ignore the argument. Passing nothing must behave exactly like the historical
+        single-root scan.
+        """
         raise NotImplementedError
 
     def read_skill_body(self, skill_name: str) -> Optional[str]:
@@ -306,7 +313,13 @@ class HermesAdapter(HostAdapter):
             host=self.name,
         )
 
-    def iter_skills(self) -> List[Dict[str, Any]]:
+    def iter_skills(self, extra_roots: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        # Only pass extra_roots when non-empty: old code called scan_skills() with no
+        # arguments, and tests monkeypatch skill_index.scan_skills with a zero-arg
+        # lambda (e.g. test_host_registry.py), so an unconditional kwarg would break
+        # them. Same byte-for-byte behavior with defaults.
+        if extra_roots:
+            return skill_index.scan_skills(extra_roots=extra_roots)
         return skill_index.scan_skills()
 
     # read_skill_body() uses HostAdapter's concrete implementation: it calls
@@ -534,7 +547,10 @@ class ClaudeCodeAdapter(HostAdapter):
 
     # ── skills: ~/.claude/skills/*/SKILL.md (flat, no category level) ──
 
-    def iter_skills(self) -> List[Dict[str, Any]]:
+    def iter_skills(self, extra_roots: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        # `extra_roots` is accepted for signature parity with HostAdapter but ignored:
+        # this host's frame of reference is a single flat tree under
+        # <CLAUDE_CODE_HOME>/skills, and skills.external_dirs is a Hermes concept.
         base = Path(_resolve_claude_code_home()) / "skills"
         if not base.exists():
             return []

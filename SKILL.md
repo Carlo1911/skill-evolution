@@ -237,7 +237,7 @@ This skill ships with ready-to-use scripts. On first load, the agent checks if t
 | Script | Purpose |
 |--------|---------|
 | `scripts/fetch_sessions.py` | Read the host's session database → NDJSON session data |
-| `scripts/skill_index.py` | Scan installed skills → structured JSON index |
+| `scripts/skill_index.py` | Scan installed skills (incluye `skills.external_dirs` / extra roots) → structured JSON index; `--extra-root` acepta 1+ roots adicionales |
 | `scripts/analyze.py` | Format NDJSON sessions for LLM consumption |
 | `scripts/proposal.py` | Proposal schema, I/O, and `apply_proposal()` logic |
 | `scripts/evaluate.py` | Evaluation gate: deterministic + LLM-judge + regression + opt-in `human_review` evaluators, versioned history |
