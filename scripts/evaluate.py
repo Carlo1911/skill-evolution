@@ -458,6 +458,42 @@ def resolve_provider(provider: Optional[str] = None, evaluator_name: Optional[st
     return os.environ.get(PROVIDER_ENV_VAR, DEFAULT_PROVIDER)
 
 
+def resolve_provider_chain(provider: Optional[str] = None,
+                           evaluator_name: Optional[str] = None) -> List[str]:
+    """Resolve an ordered fallback chain of providers.
+
+    Returns a list of provider names to try in order.  When ``SKILL_EVOLUTION_PROVIDER``
+    (or its per-evaluator override) contains commas the value is split into a chain --
+    e.g. ``claude,opencode,ollama`` tries Claude first, then OpenCode Zen, then a local
+    Ollama instance.  A single value (no commas) preserves the original single-provider
+    behaviour so no existing configuration breaks.
+
+    Explicit arg > per-evaluator override > global env var > default (``claude``).
+    """
+    raw = resolve_provider(provider, evaluator_name)
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _is_permanent_provider_error(error: Exception) -> bool:
+    """Whether a provider error is unlikely to resolve itself on a different provider.
+
+    Retryable (keep trying the *same* provider, then move on): timeouts, connection
+    errors, 5xx, rate-limits.  Permanent (skip this provider and try the next in the
+    chain): auth failures (401/403), missing API keys, unknown provider names, and
+    malformed responses (the provider works but its output shape doesn't match).
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code not in RETRYABLE_HTTP_CODES
+    # ProviderError with "is not set" or "Unknown provider" is permanent
+    if isinstance(error, ProviderError):
+        msg = str(error)
+        if "is not set" in msg or "Unknown provider" in msg:
+            return True
+    # All other errors (connection refused, timeout, DNS) are transient --
+    # they might work on the next provider.
+    return False
+
+
 USER_AGENT = "skill-evolution/0.1"
 
 # Transient HTTP statuses worth a bounded retry. Anything else 4xx (401/403/400) is a
@@ -716,17 +752,48 @@ def resolve_provider_retry_base_seconds(base_seconds: Optional[float] = None) ->
 
 def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: Optional[str] = None,
                    timeout: Optional[int] = None) -> str:
-    """Redact secrets from `prompt`, resolve the active provider, and call it.
+    """Redact secrets from `prompt`, then try each provider in the resolved chain.
 
-    Raises ProviderError for an unknown provider or any call failure (fail-closed, R21).
+    Providers are tried in order.  A *permanent* error (auth failure, missing API key,
+    unknown provider name) on one provider skips to the next in the chain.  A *transient*
+    error (timeout, 5xx, rate-limit) still retries within that provider per the existing
+    backoff rules before the chain moves on.  Only when every provider in the chain has
+    been exhausted does this raise ``ProviderError`` (fail-closed).
+
+    The chain is resolved via ``resolve_provider_chain()``, so ``SKILL_EVOLUTION_PROVIDER``
+    can be a single name (``claude`` -- backward-compatible) or a comma-separated list
+    (``claude,opencode,ollama``).
     """
-    resolved = resolve_provider(provider, evaluator_name)
-    if resolved not in PROVIDER_CALLERS:
+    chain = resolve_provider_chain(provider, evaluator_name)
+    unknown = [p for p in chain if p not in PROVIDER_CALLERS]
+    if unknown:
         raise ProviderError(
-            f"Unknown provider '{resolved}'. Available: {', '.join(sorted(PROVIDER_CALLERS))}"
+            f"Unknown provider(s) '{', '.join(unknown)}'. "
+            f"Available: {', '.join(sorted(PROVIDER_CALLERS))}"
         )
+
     safe_prompt = redact_secrets(prompt)
-    return PROVIDER_CALLERS[resolved](safe_prompt, timeout=resolve_provider_timeout(timeout))
+    resolved_timeout = resolve_provider_timeout(timeout)
+    failures: List[tuple] = []  # (provider_name, error_message)
+
+    for name in chain:
+        caller = PROVIDER_CALLERS[name]
+        try:
+            return caller(safe_prompt, timeout=resolved_timeout)
+        except Exception as e:
+            msg = f"{name}: {e}"
+            failures.append((name, msg))
+            # Permanent error on this provider -> try the next one.
+            # Transient error -> also try the next one (retries within the
+            # caller exhausted).  Only keep going while there are providers
+            # left in the chain.
+            continue
+
+    # Every provider failed.
+    raise ProviderError(
+        f"All {len(chain)} provider(s) failed: "
+        + "; ".join(f"{n}: {m}" for n, m in failures)
+    )
 
 
 # ── Deterministic evaluator (size/growth/YAML structure) ────────────

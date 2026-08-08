@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import pytest
 
 import evaluate
-from evaluate import ProviderError, call_provider, redact_secrets, resolve_provider, resolve_provider_timeout
+from evaluate import ProviderError, call_provider, redact_secrets, resolve_provider, resolve_provider_chain, resolve_provider_timeout
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +180,7 @@ def test_post_json_wraps_json_decode_error(monkeypatch):
 
 
 def test_unknown_provider_raises_clear_error():
-    with pytest.raises(ProviderError, match="Unknown provider 'bogus'"):
+    with pytest.raises(ProviderError, match="Unknown provider\\(s\\) 'bogus'"):
         call_provider("hi", provider="bogus")
 
 
@@ -330,3 +330,81 @@ def test_openai_compatible_passes_headers_through(monkeypatch):
     evaluate._call_openai_compatible("hello", "https://x/v1", "m",
                                      {"authorization": "Bearer secret"}, "T")
     assert captured["headers"] == {"authorization": "Bearer secret"}
+
+
+# ── Provider fallback chain ──────────────────────────────────────────
+
+
+def test_resolve_provider_chain_single_value_is_backward_compat(monkeypatch):
+    """A single provider name (no commas) returns a one-element chain."""
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude")
+    assert resolve_provider_chain() == ["claude"]
+
+
+def test_resolve_provider_chain_comma_separated_returns_ordered_list(monkeypatch):
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude, opencode , ollama")
+    assert resolve_provider_chain() == ["claude", "opencode", "ollama"]
+
+
+def test_resolve_provider_chain_explicit_arg_wins(monkeypatch):
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude")
+    assert resolve_provider_chain(provider="ollama") == ["ollama"]
+
+
+def test_resolve_provider_chain_empty_parts_filtered(monkeypatch):
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude,,opencode")
+    assert resolve_provider_chain() == ["claude", "opencode"]
+
+
+def test_call_provider_falls_back_when_first_fails_permanently(monkeypatch):
+    """OpenCode raises ProviderError for missing key -> chain moves to ollama."""
+    def failing_opencode(prompt, timeout=60):
+        raise ProviderError("OpenCode provider selected but OPENCODE_API_KEY is not set")
+    def succeeding(prompt, timeout=60):
+        return "fallback-success"
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "opencode", failing_opencode)
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "fallback", succeeding)
+
+    result = call_provider("test", provider="opencode,fallback")
+    assert result == "fallback-success"
+
+
+def test_call_provider_fails_when_all_providers_exhausted(monkeypatch):
+    def always_fails(prompt, timeout=60):
+        raise ProviderError("down")
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "a", always_fails)
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "b", always_fails)
+
+    with pytest.raises(ProviderError, match="All 2 provider\\(s\\) failed"):
+        call_provider("test", provider="a,b")
+
+
+def test_call_provider_succeeds_on_first_provider(monkeypatch):
+    def ok(prompt, timeout=60):
+        return "first-wins"
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "first", ok)
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "second", ok)
+
+    result = call_provider("test", provider="first,second")
+    assert result == "first-wins"
+
+
+def test_fallback_error_message_names_all_providers(monkeypatch):
+    def fail_a(prompt, timeout=60):
+        raise ProviderError("auth expired")
+    def fail_b(prompt, timeout=60):
+        raise ProviderError("timeout")
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "one", fail_a)
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "two", fail_b)
+
+    with pytest.raises(ProviderError) as excinfo:
+        call_provider("test", provider="one,two")
+
+    msg = str(excinfo.value)
+    assert "one: auth expired" in msg
+    assert "two: timeout" in msg
+    assert "All 2 provider(s) failed" in msg
