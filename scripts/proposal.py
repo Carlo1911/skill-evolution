@@ -245,28 +245,42 @@ def _decode_frontmatter_value(value: str) -> str:
 
 def _parse_frontmatter(text: str) -> dict:
     """Simple YAML-like frontmatter parser."""
+
+    def flush_list():
+        """Persist an open block list (e.g. session_ids) into data, if any."""
+        nonlocal in_list, list_key, list_items
+        if in_list and list_key:
+            data[list_key] = list_items
+        in_list = False
+        list_key = None
+        list_items = []
+
     data = {}
     list_key = None
     list_items = []
     in_list = False
     change_block = None
     in_change = False
-    
+
     for line in text.split("\n"):
         line_stripped = line.strip()
-        
-        # Handle list continuation
-        if in_list and line.startswith("  -"):
-            list_items.append(line_stripped[3:].strip().strip('"'))
+
+        # A new change-block entry ("  - field: ...") closes any open block list
+        # before starting its own block. It must be handled before list
+        # continuation, otherwise a `proposed_changes:` key that opened a list
+        # would swallow the entry as a bare list item.
+        if line.startswith("  - field:"):
+            flush_list()
+            if in_change and change_block:
+                data.setdefault("proposed_changes", []).append(change_block)
+            in_change = True
+            change_block = {
+                "field": line_stripped.split(": ", 1)[1].strip().strip('"')
+                if ": " in line_stripped else ""
+            }
             continue
-        elif in_list and not line.startswith("  -"):
-            if list_key:
-                data[list_key] = list_items
-            in_list = False
-            list_key = None
-            list_items = []
-        
-        # Handle change block
+
+        # Handle change block continuation (4-space indented keys)
         if in_change and line.startswith("    "):
             kv = line_stripped.split(":", 1)
             if len(kv) == 2:
@@ -276,38 +290,53 @@ def _parse_frontmatter(text: str) -> dict:
                     change_value = _decode_frontmatter_value(change_value)
                 change_block[change_key] = change_value
             continue
-        elif in_change and not line.startswith("    "):
+        elif in_change:
             if change_block:
                 data.setdefault("proposed_changes", []).append(change_block)
             in_change = False
             change_block = None
-        
+
+        # Handle list continuation
+        if in_list and line.startswith("  -"):
+            # strip the leading "- " (the line was already .strip()'d, so the
+            # indent is gone); this keeps unquoted items intact instead of
+            # slicing off their first character like the old [3:] did.
+            list_items.append(line_stripped[2:].strip().strip('"'))
+            continue
+        elif in_list:
+            flush_list()
+
+        # Handle bare `key:` lines (block lists like session_ids:) BEFORE the
+        # ": " check -- a line ending in ":" has no ": " and would otherwise be
+        # skipped entirely, leaving list items orphaned and the key absent.
+        if line_stripped.endswith(":") and not line_stripped.startswith(("  -", "    ")):
+            flush_list()
+            in_list = True
+            list_key = line_stripped[:-1].strip()
+            list_items = []
+            continue
+
         if ": " not in line_stripped:
             continue
-        
+
         key, value = line_stripped.split(": ", 1)
         key = key.strip()
         value = value.strip().strip('"')
-        
-        if line.startswith("  - field:"):
-            in_change = True
-            change_block = {"field": value}
-            continue
-        
+
         if value == "":
             in_list = True
             list_key = key
             list_items = []
             continue
-        
+
         data[key] = value
-    
+
     # Close open structures
     if in_list and list_key:
         data[list_key] = list_items
     if in_change and change_block:
         data.setdefault("proposed_changes", []).append(change_block)
-    
+
     return data
 
 

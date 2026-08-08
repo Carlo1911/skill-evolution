@@ -102,3 +102,70 @@ def test_secret_in_multiline_new_value_is_redacted_before_encoding(tmp_path):
     assert "sk-ant-api03-should-be-redacted" not in raw_file_content
     assert "sk-ant-api03-should-be-redacted" not in loaded.proposed_changes[0].new_value
     assert "[REDACTED]" in loaded.proposed_changes[0].new_value
+
+
+def test_session_ids_survive_roundtrip(tmp_path):
+    """session_ids is a block list (`session_ids:` + `  - "..."` items) in the
+    frontmatter. _parse_frontmatter() used to skip the bare `session_ids:` line
+    (no ": ") entirely, so load_proposal() returned [] for every file on disk
+    and the tool_calls/analyzer_prompt gate targets silently never ran."""
+    proposal = SkillEvolutionProposal(
+        type=ProposalType.IMPROVE_EXISTING,
+        target_skill="some-skill",
+        confidence=0.85,
+        summary="Evidence sessions",
+        rationale="test rationale",
+        session_ids=["20260701_100000_aaa", "20260702_200000_bbb"],
+    )
+
+    path = save_proposal(proposal, directory=str(tmp_path))
+    loaded = load_proposal(path)
+
+    assert loaded.session_ids == ["20260701_100000_aaa", "20260702_200000_bbb"]
+
+
+def test_session_ids_and_proposed_changes_survive_together(tmp_path):
+    """The frontmatter renders session_ids BEFORE proposed_changes, so the
+    change-block opener ("  - field:") must close the open session_ids list
+    instead of being swallowed as a bare list item."""
+    proposal = SkillEvolutionProposal(
+        type=ProposalType.IMPROVE_EXISTING,
+        target_skill="some-skill",
+        confidence=0.85,
+        summary="Evidence sessions",
+        rationale="test rationale",
+        session_ids=["20260701_100000_aaa"],
+        proposed_changes=[
+            ProposedChange(field="description", old_value="Old desc.", new_value="New desc."),
+            ProposedChange(field="body", old_value="old body", new_value="new body"),
+        ],
+    )
+
+    path = save_proposal(proposal, directory=str(tmp_path))
+    loaded = load_proposal(path)
+
+    assert loaded.session_ids == ["20260701_100000_aaa"]
+    assert len(loaded.proposed_changes) == 2
+    assert [c.field for c in loaded.proposed_changes] == ["description", "body"]
+    assert loaded.proposed_changes[0].old_value == "Old desc."
+    assert loaded.proposed_changes[0].new_value == "New desc."
+
+
+def test_parse_frontmatter_hand_written_session_ids_block():
+    """Parse a hand-written frontmatter block (the analyzer writes these files)
+    with a session_ids block followed by scalar keys -- the keys after the list
+    must not be absorbed into it."""
+    from proposal import _parse_frontmatter
+
+    data = _parse_frontmatter(
+        "proposal_id: 20260806-004\n"
+        "session_ids:\n"
+        "  - 20260701_100000_aaa\n"
+        "  - 20260702_200000_bbb\n"
+        "status: proposed\n"
+        "confidence: 0.85\n"
+    )
+
+    assert data["session_ids"] == ["20260701_100000_aaa", "20260702_200000_bbb"]
+    assert data["status"] == "proposed"
+    assert data["confidence"] == "0.85"
