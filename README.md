@@ -29,7 +29,7 @@ Everything else is optional and only needs to be set to change a default:
 | `SKILL_EVOLUTION_AUTO_APPLY` / `SKILL_EVOLUTION_MIN_CONFIDENCE` | off / `0.85` | Read by *your* apply step, not by the scripts themselves — see "Auto-Apply" below |
 | `SKILL_EVOLUTION_EVALUATORS` | `deterministic,llm_judge,regression` | Which evaluators the gate runs |
 | `SKILL_EVOLUTION_GATE_STRICTNESS` | `strict` | `strict` (all must pass) or `majority` |
-| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude` / `ollama` / `opencode` / `openai` / `gemini` |
+| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude` / `ollama` / `opencode` / `openai` / `gemini`; comma-separated for a fallback chain (e.g. `claude,opencode,ollama`) |
 | `SKILL_EVOLUTION_CLAUDE_CODE_HOME` | `~/.claude` | Only read when `SKILL_EVOLUTION_HOST=claude_code` |
 | `SKILL_EVOLUTION_HISTORY_PATH` | `./eval_history.jsonl` | Evaluation history file |
 
