@@ -270,7 +270,7 @@ The evaluation framework scores four independent targets, each writing to the sa
 
 | Target | Function | History key | What it scores |
 |--------|----------|-------------|----------------|
-| **skill text** (v1) | `evaluate_skill_text()` | `skill:<name>` | The body/description change in a proposal — size, growth, frontmatter structure, rubric quality, regression vs prior passes |
+| **skill text** (v1) | `evaluate_skill_text()` | `skill:<name>` | The post-apply candidate -- installed body with the proposal's fragment spliced in (anchor must occur exactly once, else fail-closed) -- scored on size, growth, frontmatter structure, rubric quality, regression vs prior passes |
 | **proposal quality** | `evaluate_proposal()` | `proposal:<uuid>` | The proposal as a document — summary clarity, rationale groundedness, change coherence |
 | **tool-call quality** | `evaluate_tool_calls()` | `tool_calls:<session_id>` | Tool selection, sequencing, and result extraction from the session that produced the proposal |
 | **analyzer prompt quality** | `evaluate_analyzer_prompt()` | `analyzer_prompt:<session_id>` | Whether the analyzer's generation step produced a proposal grounded in the sessions it was given |

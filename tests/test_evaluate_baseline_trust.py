@@ -79,27 +79,34 @@ def _proposal(new_value, old_value, target_skill="demo", field="body"):
 
 
 def test_baseline_comes_from_the_installed_skill_not_the_proposal(tmp_path, monkeypatch):
-    """A candidate admissible against the claim but not against the installed file is
-    judged on the installed file."""
+    """A forged old_value is refused, not measured against its own claim.
+
+    Since the splice fix (20260910-004), a claim that does not occur in the
+    installed file fails closed with an anchor-stale refusal instead of being
+    scored verbatim against the installed size. Either way the ratchet stays
+    shut: a 30000B claim can no longer set the ceiling for its 26000B body.
+    """
     _install(tmp_path, monkeypatch, "demo", _sized(10000))
 
     # Claims a 30000B baseline, so 26000B would look like a modest -13% tightening.
-    # Against the real 10000B body it is +160% growth.
+    # The claim occurs nowhere in the real 10000B body, so the gate refuses
+    # to guess what apply would write.
     results = evaluate.evaluate_skill_text(_proposal(_sized(26000), _sized(30000)))
 
     assert results[0].passed is False
-    assert "10" in results[0].feedback  # measured against the real body, not the claim
+    assert "stale" in results[0].feedback  # refused, not measured -- still no ratchet
 
 
 def test_forged_old_value_cannot_ratchet_past_the_cap(tmp_path, monkeypatch):
     """The scenario the ratchet would otherwise open: an enormous claimed baseline turns
-    the absolute cap into a ceiling the proposal sets for itself."""
+    the absolute cap into a ceiling the proposal sets for itself. The anchor check fires
+    first, so the forged claim never reaches the cap comparison -- and still fails."""
     _install(tmp_path, monkeypatch, "demo", _sized(9000))
 
     results = evaluate.evaluate_skill_text(_proposal(_sized(950_000), _sized(951_000)))
 
     assert results[0].passed is False
-    assert "exceeds" in results[0].feedback
+    assert "stale" in results[0].feedback
 
 
 def test_falls_back_to_old_value_when_the_skill_is_unresolvable(monkeypatch):
@@ -139,12 +146,42 @@ def test_description_change_does_not_use_the_installed_file_size(tmp_path, monke
 
 
 def test_recorded_history_size_matches_the_size_that_was_judged(tmp_path, monkeypatch):
-    """evaluate_and_record() must resolve the baseline the same way evaluate_skill_text()
-    did, or original_size_for_target() later reads back a number no gate ever used."""
+    """evaluate_and_record() must record the spliced size, not the fragment size.
+
+    With a valid anchor, the recorded content_size is the post-apply candidate
+    (installed with old_value replaced) and baseline_size is the installed
+    file -- exactly what the gate judged. With a stale anchor the entry
+    records no sizes at all, mirroring the malformed path: persisting the
+    fragment's bytes as "where this skill started" would poison every later
+    cumulative check.
+    """
+    installed = _sized(10000)
+    _install(tmp_path, monkeypatch, "demo", installed)
+    installed_size = len(installed.encode("utf-8"))
+    anchor = "Guidance line that carries real instruction content.\n"
+    assert installed.count(anchor) >= 1
+    # Make the anchor unique so the splice is unambiguous.
+    first = installed.index(anchor)
+    unique_anchor = installed[first - 20:first] + anchor
+    assert installed.count(unique_anchor) == 1
+    replacement = unique_anchor.replace("real instruction", "real instruction, extended")
+
+    evaluate.evaluate_and_record(_proposal(replacement, unique_anchor))
+
+    entries = evaluate.read_history("skill:demo")
+    spliced_size = len(installed.replace(unique_anchor, replacement).encode("utf-8"))
+    assert entries[-1]["content_size"] == spliced_size
+    assert entries[-1]["baseline_size"] == installed_size
+
+
+def test_stale_anchor_records_no_sizes(tmp_path, monkeypatch):
+    """A splice refusal records the failing gate but no sizes -- there is no
+    judged text to measure cumulative drift against."""
     _install(tmp_path, monkeypatch, "demo", _sized(10000))
-    installed_size = len(_sized(10000).encode("utf-8"))
 
     evaluate.evaluate_and_record(_proposal(_sized(9500), _sized(30000)))
 
     entries = evaluate.read_history("skill:demo")
-    assert entries[-1]["baseline_size"] == installed_size
+    assert entries[-1]["passed"] is False
+    assert "content_size" not in entries[-1]
+    assert "baseline_size" not in entries[-1]

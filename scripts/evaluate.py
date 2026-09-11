@@ -1504,6 +1504,47 @@ def _resolve_baseline(proposal: Any, content_kind: str, claimed: Optional[str]) 
     return claimed if installed is None else installed
 
 
+def _splice_candidate(content: str, claimed_old: Optional[str],
+                      baseline_resolved: Optional[str],
+                      content_kind: str) -> Tuple[str, Optional[str]]:
+    """Build the post-apply candidate for a fragment-style body change.
+
+    The analyzer contract writes old_value/new_value as section fragments
+    (patch semantics for the Hermes adapter), but scoring the fragment
+    verbatim against the full installed body makes every such proposal read
+    as a ~-80% shrink -- including ones already applied. Score what apply
+    will actually write instead: installed with old_value replaced by the
+    new fragment.
+
+    Returns (candidate, error). error is None on success; otherwise the
+    candidate is returned unchanged and the caller must fail closed --
+    a stale anchor (0 occurrences) or an ambiguous one (2+) means the
+    proposal no longer describes the installed file.
+
+    Non-body kinds, missing old_value (create_new), and missing baseline
+    all fall through to verbatim scoring -- there is nothing to splice
+    against in those cases.
+    """
+    if content_kind != "body":
+        return content, None
+    if not claimed_old:
+        return content, None
+    if not baseline_resolved:
+        return content, None
+    count = baseline_resolved.count(claimed_old)
+    if count == 1:
+        return baseline_resolved.replace(claimed_old, content), None
+    if count == 0:
+        return content, (
+            "anchor stale: old_value not found in the installed skill body -- "
+            "the skill changed since this proposal was written"
+        )
+    return content, (
+        f"anchor ambiguous: old_value occurs {count} times in the installed "
+        "skill body -- refusing to guess which occurrence to replace"
+    )
+
+
 def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     """Evaluate a proposal's skill-text content end to end.
 
@@ -1514,7 +1555,7 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     evaluators and gate combination.
     """
     target = target_key_for_proposal(proposal)
-    content, content_kind, baseline = _extract_evaluated_content(proposal)
+    content, content_kind, claimed_old = _extract_evaluated_content(proposal)
 
     # A change with an empty new_value has no text to score and nothing to apply, so no
     # evaluator can say anything useful about it. Fail closed here rather than running the
@@ -1538,9 +1579,23 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # rather than dividing by a zero baseline. _resolve_baseline() prefers the installed
     # skill over the proposal's own claim -- see its docstring for why that matters now
     # that the cap is a ratchet.
-    baseline = _resolve_baseline(proposal, content_kind, baseline)
+    baseline = _resolve_baseline(proposal, content_kind, claimed_old)
     if baseline:
         context["baseline_size"] = len(baseline.encode("utf-8"))
+
+    # Fragment-style body proposals (the analyzer's canonical format) would
+    # otherwise score the fragment verbatim against the full baseline and
+    # always fail the shrink floor. Splice first so the gate judges the text
+    # apply will actually write. A stale/ambiguous anchor fails closed here
+    # rather than spending provider calls on an unapplicable change.
+    content, splice_error = _splice_candidate(content, claimed_old, baseline, content_kind)
+    if splice_error is not None:
+        return [EvalResult(
+            score=0.0,
+            feedback=f"splice refused: {splice_error}",
+            passed=False,
+            evaluator_name="structure",
+        )]
 
     # Second reference point: where this target started, so drift spread across several
     # individually-compliant passes is still caught. Absent history leaves it inert.
@@ -1892,17 +1947,26 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         # explanatory prose here would become "where this skill started" and make every
         # later cumulative check nonsense (a real body would read as several-thousand-percent
         # growth). Omitting both sizes leaves the lookup skipping this entry.
-        content, content_kind, baseline = _extract_evaluated_content(proposal)
+        content, content_kind, claimed_old = _extract_evaluated_content(proposal)
         if content_kind == MALFORMED_CONTENT_KIND:
             _record_target("skill", target, skill_results, kind="skill_text")
         else:
-            baseline = _resolve_baseline(proposal, content_kind, baseline)
-            _record_target(
-                "skill", target, skill_results,
-                content_size=len(content.encode("utf-8")),
-                baseline_size=len(baseline.encode("utf-8")) if baseline else None,
-                kind="skill_text",
-            )
+            baseline = _resolve_baseline(proposal, content_kind, claimed_old)
+            # Mirror evaluate_skill_text()'s splice so the recorded size is
+            # the size that was actually judged. On splice refusal (or when
+            # there is nothing to splice) record without sizes -- persisting
+            # the fragment's ~1KB as "where this skill started" would poison
+            # every later cumulative check, same reason malformed records none.
+            spliced, splice_error = _splice_candidate(content, claimed_old, baseline, content_kind)
+            if splice_error is not None:
+                _record_target("skill", target, skill_results, kind="skill_text")
+            else:
+                _record_target(
+                    "skill", target, skill_results,
+                    content_size=len(spliced.encode("utf-8")),
+                    baseline_size=len(baseline.encode("utf-8")) if baseline else None,
+                    kind="skill_text",
+                )
 
     if "proposal" in resolved_targets:
         proposal_id = getattr(proposal, "proposal_id", "unknown")
