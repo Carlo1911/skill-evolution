@@ -192,7 +192,8 @@ def test_unknown_provider_error_lists_openai_and_gemini():
 
 
 def test_provider_callers_has_five_registered_providers():
-    assert set(evaluate.PROVIDER_CALLERS) == {"claude", "ollama", "opencode", "openai", "gemini"}
+    assert set(evaluate.PROVIDER_CALLERS) == {"claude", "ollama", "opencode", "opencode_zen",
+                                              "opencode_go", "openai", "gemini"}
 
 
 def test_redact_secrets_removes_gemini_env_var():
@@ -274,14 +275,14 @@ def test_call_provider_timeout_is_generic_across_providers(monkeypatch):
         captured.setdefault("timeouts", []).append(timeout)
         return "ok"
 
-    for name in ("claude", "ollama", "opencode", "openai", "gemini"):
+    for name in ("claude", "ollama", "opencode", "opencode_zen", "opencode_go", "openai", "gemini"):
         monkeypatch.setitem(evaluate.PROVIDER_CALLERS, name, fake_caller)
     monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER_TIMEOUT", "90")
 
-    for name in ("claude", "ollama", "opencode", "openai", "gemini"):
+    for name in ("claude", "ollama", "opencode", "opencode_zen", "opencode_go", "openai", "gemini"):
         call_provider("hi", provider=name)
 
-    assert captured["timeouts"] == [90, 90, 90, 90, 90]
+    assert captured["timeouts"] == [90, 90, 90, 90, 90, 90, 90]
 
 
 # ── Shared OpenAI-compatible caller (P3-3) ───────────────────────────

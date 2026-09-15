@@ -464,14 +464,18 @@ def resolve_provider_chain(provider: Optional[str] = None,
 
     Returns a list of provider names to try in order.  When ``SKILL_EVOLUTION_PROVIDER``
     (or its per-evaluator override) contains commas the value is split into a chain --
-    e.g. ``claude,opencode,ollama`` tries Claude first, then OpenCode Zen, then a local
-    Ollama instance.  A single value (no commas) preserves the original single-provider
-    behaviour so no existing configuration breaks.
+    e.g. ``claude,opencode_zen,opencode_go,ollama`` tries Claude first, then OpenCode
+    Zen, then OpenCode Go, then a local Ollama instance.  A single value (no commas)
+    preserves the original single-provider behaviour so no existing configuration breaks.
+
+    Names are normalized (lowercased, ``-`` -> ``_``) so ``opencode-go`` and
+    ``opencode_go`` are interchangeable.  ``opencode`` remains as a legacy alias of
+    ``opencode_zen``.
 
     Explicit arg > per-evaluator override > global env var > default (``claude``).
     """
     raw = resolve_provider(provider, evaluator_name)
-    return [p.strip() for p in raw.split(",") if p.strip()]
+    return [p.strip().lower().replace("-", "_") for p in raw.split(",") if p.strip()]
 
 
 def _is_permanent_provider_error(error: Exception) -> bool:
@@ -618,21 +622,24 @@ def _call_ollama(prompt: str, timeout: int = 60) -> str:
 OPENCODE_BASE_URL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_BASE_URL"
 OPENCODE_MODEL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_MODEL"
 OPENCODE_API_KEY_ENV_VAR = "OPENCODE_API_KEY"
+OPENCODE_ZEN_BASE_URL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_ZEN_BASE_URL"
+OPENCODE_ZEN_MODEL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_ZEN_MODEL"
+OPENCODE_GO_BASE_URL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_GO_BASE_URL"
+OPENCODE_GO_MODEL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_GO_MODEL"
 DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_OPENCODE_MODEL = "big-pickle"
+DEFAULT_OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
+DEFAULT_OPENCODE_ZEN_MODEL = "big-pickle"
+DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+DEFAULT_OPENCODE_GO_MODEL = "deepseek-v4-flash"
 
 
-def _call_opencode(prompt: str, timeout: int = 60) -> str:
-    """Call OpenCode Zen, an OpenAI-compatible hosted gateway.
+def _call_opencode_tier(prompt: str, base_url: str, model: str, label: str,
+                        timeout: int = 60) -> str:
+    """Shared OpenCode caller for the Zen/Go tiers (both OpenAI-compatible).
 
-    Two catalogues exist and they are not interchangeable: Zen
-    (`https://opencode.ai/zen/v1`, the default here) carries `big-pickle` and the
-    `*-free` variants, while the Go subscription tier (`https://opencode.ai/zen/go/v1`)
-    exposes a different, smaller list without `big-pickle`. Point
-    SKILL_EVOLUTION_OPENCODE_BASE_URL at the tier whose model id you set.
-
-    Unlike the Ollama caller this reaches a third party, so a missing key fails closed
-    with an actionable message rather than sending an unauthenticated request.
+    Auth is always the same ``OPENCODE_API_KEY`` bearer token; only the endpoint
+    catalogue and default model differ per tier.
     """
     api_key = os.environ.get(OPENCODE_API_KEY_ENV_VAR, "")
     if not api_key:
@@ -640,12 +647,58 @@ def _call_opencode(prompt: str, timeout: int = 60) -> str:
             f"OpenCode provider selected but {OPENCODE_API_KEY_ENV_VAR} is not set. "
             f"Export it (do not commit it) before running evaluators against OpenCode."
         )
-
-    base_url = os.environ.get(OPENCODE_BASE_URL_ENV_VAR, DEFAULT_OPENCODE_BASE_URL)
-    model = os.environ.get(OPENCODE_MODEL_ENV_VAR, DEFAULT_OPENCODE_MODEL)
     return _call_openai_compatible(
-        prompt, base_url, model, {"authorization": f"Bearer {api_key}"}, "OpenCode Zen", timeout,
+        prompt, base_url, model, {"authorization": f"Bearer {api_key}"}, label, timeout,
     )
+
+
+def _call_opencode_zen(prompt: str, timeout: int = 60) -> str:
+    """Call OpenCode Zen (``https://opencode.ai/zen/v1``).
+
+    Catalogue (``/zen/v1/models``) carries ``big-pickle`` and the ``*-free`` variants.
+    Tier-specific ``SKILL_EVOLUTION_OPENCODE_ZEN_BASE_URL``/``_MODEL`` win; the legacy
+    ``SKILL_EVOLUTION_OPENCODE_BASE_URL``/``_MODEL`` are honored as fallback so existing
+    ``provider=opencode`` configurations keep working byte-for-byte.
+    """
+    base_url = os.environ.get(
+        OPENCODE_ZEN_BASE_URL_ENV_VAR,
+        os.environ.get(OPENCODE_BASE_URL_ENV_VAR, DEFAULT_OPENCODE_ZEN_BASE_URL),
+    )
+    model = os.environ.get(
+        OPENCODE_ZEN_MODEL_ENV_VAR,
+        os.environ.get(OPENCODE_MODEL_ENV_VAR, DEFAULT_OPENCODE_ZEN_MODEL),
+    )
+    return _call_opencode_tier(prompt, base_url, model, "OpenCode Zen", timeout)
+
+
+def _call_opencode_go(prompt: str, timeout: int = 60) -> str:
+    """Call OpenCode Go subscription tier (``https://opencode.ai/zen/go/v1``).
+
+    Catalogue (``/zen/go/v1/models``) is a different, smaller list WITHOUT ``big-pickle``
+    (e.g. ``deepseek-v4-flash`` -- note: no ``-free`` suffix, unlike Zen). Configured via
+    ``SKILL_EVOLUTION_OPENCODE_GO_BASE_URL``/``SKILL_EVOLUTION_OPENCODE_GO_MODEL``; the
+    legacy generic ``SKILL_EVOLUTION_OPENCODE_*`` vars are deliberately NOT read here so a
+    Zen-pointed generic override can never silently redirect the Go tier.
+    """
+    base_url = os.environ.get(OPENCODE_GO_BASE_URL_ENV_VAR, DEFAULT_OPENCODE_GO_BASE_URL)
+    model = os.environ.get(OPENCODE_GO_MODEL_ENV_VAR, DEFAULT_OPENCODE_GO_MODEL)
+    return _call_opencode_tier(prompt, base_url, model, "OpenCode Go", timeout)
+
+
+def _call_opencode(prompt: str, timeout: int = 60) -> str:
+    """Legacy alias of :func:`_call_opencode_zen`.
+
+    Two catalogues exist and they are not interchangeable: Zen
+    (`https://opencode.ai/zen/v1`, the default here) carries `big-pickle` and the
+    `*-free` variants, while the Go subscription tier (`https://opencode.ai/zen/go/v1`)
+    exposes a different, smaller list without `big-pickle`. For new configurations prefer
+    the explicit ``opencode_zen`` / ``opencode_go`` providers in
+    ``SKILL_EVOLUTION_PROVIDER`` (e.g. ``claude,opencode_zen,opencode_go,ollama``).
+
+    Unlike the Ollama caller this reaches a third party, so a missing key fails closed
+    with an actionable message rather than sending an unauthenticated request.
+    """
+    return _call_opencode_zen(prompt, timeout=timeout)
 
 
 def _call_openai(prompt: str, timeout: int = 60) -> str:
@@ -700,6 +753,8 @@ PROVIDER_CALLERS = {
     "claude": _call_claude,
     "ollama": _call_ollama,
     "opencode": _call_opencode,
+    "opencode_zen": _call_opencode_zen,
+    "opencode_go": _call_opencode_go,
     "openai": _call_openai,
     "gemini": _call_gemini,
 }

@@ -26,6 +26,10 @@ def clean_env(monkeypatch):
         "SKILL_EVOLUTION_PROVIDER",
         "SKILL_EVOLUTION_OPENCODE_BASE_URL",
         "SKILL_EVOLUTION_OPENCODE_MODEL",
+        "SKILL_EVOLUTION_OPENCODE_ZEN_BASE_URL",
+        "SKILL_EVOLUTION_OPENCODE_ZEN_MODEL",
+        "SKILL_EVOLUTION_OPENCODE_GO_BASE_URL",
+        "SKILL_EVOLUTION_OPENCODE_GO_MODEL",
         "OPENCODE_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -50,6 +54,8 @@ def captured_post(monkeypatch):
 
 def test_opencode_is_a_registered_provider():
     assert "opencode" in evaluate.PROVIDER_CALLERS
+    assert "opencode_zen" in evaluate.PROVIDER_CALLERS
+    assert "opencode_go" in evaluate.PROVIDER_CALLERS
 
 
 def test_opencode_resolvable_globally_and_per_evaluator(monkeypatch):
@@ -125,3 +131,85 @@ def test_api_key_is_not_placed_in_the_url(monkeypatch, captured_post):
     evaluate._call_opencode("hello")
 
     assert "test-key" not in captured_post["url"]
+
+
+def test_opencode_is_legacy_alias_of_zen(monkeypatch, captured_post):
+    """provider=opencode keeps byte-for-byte Zen behavior (backward compat)."""
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+
+    evaluate._call_opencode("hello")
+    opencode_url = captured_post["url"]
+    opencode_model = captured_post["body"]["model"]
+
+    evaluate._call_opencode_zen("hello")
+
+    assert captured_post["url"] == opencode_url == "https://opencode.ai/zen/v1/chat/completions"
+    assert captured_post["body"]["model"] == opencode_model == "big-pickle"
+
+
+def test_zen_defaults_to_zen_endpoint_and_big_pickle(monkeypatch, captured_post):
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+
+    assert evaluate._call_opencode_zen("hello") == "stubbed reply"
+    assert captured_post["url"] == "https://opencode.ai/zen/v1/chat/completions"
+    assert captured_post["body"]["model"] == "big-pickle"
+
+
+def test_go_defaults_to_go_endpoint_without_big_pickle(monkeypatch, captured_post):
+    """The Go catalogue has no big-pickle; the default must be a Go model id."""
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+
+    assert evaluate._call_opencode_go("hello") == "stubbed reply"
+    assert captured_post["url"] == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert captured_post["body"]["model"] == "deepseek-v4-flash"
+    assert captured_post["provider_label"] == "OpenCode Go"
+
+
+def test_zen_tier_env_vars_win_over_legacy_generic(monkeypatch, captured_post):
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+    monkeypatch.setenv("SKILL_EVOLUTION_OPENCODE_BASE_URL", "https://legacy.example.com/v1")
+    monkeypatch.setenv("SKILL_EVOLUTION_OPENCODE_MODEL", "legacy-model")
+    monkeypatch.setenv("SKILL_EVOLUTION_OPENCODE_ZEN_BASE_URL", "https://zen.example.com/v1/")
+    monkeypatch.setenv("SKILL_EVOLUTION_OPENCODE_ZEN_MODEL", "zen-model")
+
+    evaluate._call_opencode_zen("hello")
+
+    assert captured_post["url"] == "https://zen.example.com/v1/chat/completions"
+    assert captured_post["body"]["model"] == "zen-model"
+
+
+def test_go_ignores_legacy_generic_vars(monkeypatch, captured_post):
+    """A Zen-pointed generic override must never silently redirect the Go tier."""
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+    monkeypatch.setenv("SKILL_EVOLUTION_OPENCODE_BASE_URL", "https://opencode.ai/zen/v1")
+    monkeypatch.setenv("SKILL_EVOLUTION_OPENCODE_MODEL", "big-pickle")
+    monkeypatch.setenv("SKILL_EVOLUTION_OPENCODE_GO_MODEL", "mimo-v2.5")
+
+    evaluate._call_opencode_go("hello")
+
+    assert captured_post["url"] == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert captured_post["body"]["model"] == "mimo-v2.5"
+
+
+def test_chain_normalizes_hyphen_to_underscore(monkeypatch):
+    from evaluate import resolve_provider_chain
+    monkeypatch.setenv("SKILL_EVOLUTION_PROVIDER", "claude, opencode-go, opencode-zen")
+    assert resolve_provider_chain() == ["claude", "opencode_go", "opencode_zen"]
+
+
+def test_zen_go_chain_falls_back_in_order(monkeypatch):
+    calls = []
+
+    def failing_zen(prompt, timeout=60):
+        calls.append("zen")
+        raise ProviderError("zen down")
+
+    def succeeding_go(prompt, timeout=60):
+        calls.append("go")
+        return "go-success"
+
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "opencode_zen", failing_zen)
+    monkeypatch.setitem(evaluate.PROVIDER_CALLERS, "opencode_go", succeeding_go)
+
+    assert call_provider("hi", provider="opencode_zen,opencode_go") == "go-success"
+    assert calls == ["zen", "go"]
