@@ -47,6 +47,24 @@ def test_load_proposal_names_the_frontmatter_problem(tmp_path, content, problem)
     assert str(path) in str(exc.value)
 
 
+def test_closing_delimiter_on_the_last_line_without_newline_loads(tmp_path):
+    """Live: 20260823-001.md is frontmatter only and ends in '---' with no newline."""
+    path = tmp_path / "p1.md"
+    path.write_text("---\n" + FRONTMATTER + "---")
+
+    loaded = proposal_module.load_proposal(str(path))
+
+    assert loaded.proposal_id == "p1"
+
+
+def test_a_delimiter_prefix_is_not_a_closing_line(tmp_path):
+    path = tmp_path / "p1.md"
+    path.write_text("---\n" + FRONTMATTER + "----\n\nbody\n")
+
+    with pytest.raises(ValueError, match="no closing '---' line follows"):
+        proposal_module.load_proposal(str(path))
+
+
 def test_list_proposals_warning_carries_the_reason(tmp_path, capsys):
     (tmp_path / "p1.md").write_text(FRONTMATTER + "---\n\nbody\n")
 

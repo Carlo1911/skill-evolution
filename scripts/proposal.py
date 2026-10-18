@@ -166,7 +166,7 @@ def _frontmatter_problem(content: str) -> str:
     """Name why `content` has no frontmatter block load_proposal() can parse.
 
     The bare "Invalid proposal file" this replaces sent the reviewer into the file to find
-    out; the live case was an analyzer-written proposal missing only its opening `---`.
+    out.
     """
     if not content.startswith("---\n"):
         return "missing opening '---' frontmatter delimiter on line 1"
@@ -176,7 +176,10 @@ def _frontmatter_problem(content: str) -> str:
 def load_proposal(path: str) -> SkillEvolutionProposal:
     with open(path) as f:
         content = f.read()
-    m = re.match(r"^---\n(.*?)\n---\n(.*)", content, re.DOTALL)
+    # The closing `---` may be the file's last line with no newline after it: an
+    # analyzer-written proposal holding only frontmatter (live: 20260823-001.md) ends
+    # exactly like that, and requiring "\n---\n" reported it unreadable.
+    m = re.match(r"^---\n(.*?)\n---(?:\n|\Z)", content, re.DOTALL)
     if not m:
         raise ValueError(f"Invalid proposal file: {path}: {_frontmatter_problem(content)}")
 
@@ -271,7 +274,7 @@ def _encode_frontmatter_value(value: str) -> str:
     """Escape a proposed-change value for the hand-rolled frontmatter parser.
 
     load_proposal() finds the frontmatter block by matching up to the first
-    "\\n---\\n", and _parse_frontmatter() reads change fields line-by-line. A
+    "---" line, and _parse_frontmatter() reads change fields line-by-line. A
     multi-line value containing its own "---" (e.g. a GEPA-optimized skill
     body, which starts with its own YAML frontmatter) corrupts both: the outer
     match truncates early, and the per-line reader misreads embedded colons
