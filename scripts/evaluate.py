@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import re
 import secrets
@@ -295,11 +296,23 @@ def _parse_retention(raw: Optional[str]):
     if raw is None or not raw.strip():
         return None
     value = raw.strip()
-    if value.endswith("mo"):
-        return ("age_days", float(value[:-2]) * 30)
-    if value.endswith("d"):
-        return ("age_days", float(value[:-1]))
-    return ("count", int(value))
+    try:
+        if value.endswith("mo"):
+            rule = ("age_days", float(value[:-2]) * 30)
+        elif value.endswith("d"):
+            rule = ("age_days", float(value[:-1]))
+        else:
+            rule = ("count", int(value))
+    except ValueError:
+        rule = None
+    # A typo must not take the gate down: evaluate_and_record() prunes after appending
+    # history, so raising here turned every apply_proposal() into "evaluation gate raised".
+    # Warn and keep everything, like _env_number().
+    if rule is None or not math.isfinite(rule[1]):
+        print(f"warning: {HISTORY_RETENTION_ENV_VAR}={raw!r} is not a valid retention (N, Nd or Nmo); "
+              f"treating it as unbounded", file=sys.stderr)
+        return None
+    return rule
 
 
 def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
@@ -2356,7 +2369,12 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
     )
 
     if auto_prune:
-        prune_history()
+        # Housekeeping after the gate decision and its history entries: a pruning failure
+        # must not turn a decided gate into "evaluation gate raised" in apply_proposal().
+        try:
+            prune_history()
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: history pruning failed and was skipped: {e}", file=sys.stderr)
 
     return all_results, combined_result, gate_passed
 

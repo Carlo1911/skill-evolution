@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -379,11 +380,23 @@ def _parse_state_retention(raw: Optional[str]):
     if raw is None or not raw.strip():
         return None
     value = raw.strip()
-    if value.endswith("mo"):
-        return ("age_days", float(value[:-2]) * 30)
-    if value.endswith("d"):
-        return ("age_days", float(value[:-1]))
-    return ("count", int(value))
+    try:
+        if value.endswith("mo"):
+            rule = ("age_days", float(value[:-2]) * 30)
+        elif value.endswith("d"):
+            rule = ("age_days", float(value[:-1]))
+        else:
+            rule = ("count", int(value))
+    except ValueError:
+        rule = None
+    # A typo must not take the run down: this is read after mark_processed() on the fetch
+    # path, so raising there marked sessions processed and then exited before emitting
+    # them -- they were never analyzed. Warn and keep everything, like _env_number().
+    if rule is None or not math.isfinite(rule[1]):
+        print(f"warning: {STATE_RETENTION_ENV_VAR}={raw!r} is not a valid retention (N, Nd or Nmo); "
+              f"treating it as unbounded", file=sys.stderr)
+        return None
+    return rule
 
 
 def prune_processed(retention: Optional[str] = None, keep_ids: Optional[List[str]] = None,
@@ -637,10 +650,24 @@ def fetch_sessions(
     # writes from itself -- see prune_processed()'s docstring for why that floor is
     # structurally required, not just cautious. Placed after the dry-run return (like
     # mark_processed() itself) so a dry run never prunes either.
-    _warn_if_state_retention_below_lookback(lookback_hours)
-    prune_processed(keep_ids=just_processed, host=resolved_host)
+    _housekeep_after_marking(
+        lookback_hours, lambda: prune_processed(keep_ids=just_processed, host=resolved_host))
 
     return results
+
+
+def _housekeep_after_marking(lookback_hours: int, prune) -> None:
+    """Retention warning + pruning, which both fetch paths run *after* mark_processed().
+
+    Nothing here may abort the run: the sessions are already marked processed but not yet
+    emitted, so an exception would lose them for good. Failures are reported on stderr
+    (stdout is the NDJSON channel) and the run carries on.
+    """
+    try:
+        _warn_if_state_retention_below_lookback(lookback_hours)
+        prune()
+    except Exception as e:  # noqa: BLE001 -- see docstring
+        print(f"warning: state pruning failed and was skipped: {e}", file=sys.stderr)
 
 
 def _warn_if_state_retention_below_lookback(lookback_hours: int) -> None:
@@ -836,8 +863,8 @@ def fetch_sessions_for_host(
     new_processed = list(processed | just_processed)
     adapter.mark_processed(new_processed)
 
-    _warn_if_state_retention_below_lookback(lookback_hours)
-    adapter.prune_processed(keep_ids=list(just_processed))
+    _housekeep_after_marking(
+        lookback_hours, lambda: adapter.prune_processed(keep_ids=list(just_processed)))
 
     return results
 

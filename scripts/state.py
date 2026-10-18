@@ -6,6 +6,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -175,11 +176,23 @@ def _parse_state_retention(raw):
     if raw is None or not raw.strip():
         return None
     value = raw.strip()
-    if value.endswith("mo"):
-        return ("age_days", float(value[:-2]) * 30)
-    if value.endswith("d"):
-        return ("age_days", float(value[:-1]))
-    return ("count", int(value))
+    try:
+        if value.endswith("mo"):
+            rule = ("age_days", float(value[:-2]) * 30)
+        elif value.endswith("d"):
+            rule = ("age_days", float(value[:-1]))
+        else:
+            rule = ("count", int(value))
+    except ValueError:
+        rule = None
+    # A typo must not take the run down: this is read after mark_processed() on the fetch
+    # path, so raising there marked sessions processed and then exited before emitting
+    # them -- they were never analyzed. Warn and keep everything, like _env_number().
+    if rule is None or not math.isfinite(rule[1]):
+        print(f"warning: {STATE_RETENTION_ENV_VAR}={raw!r} is not a valid retention (N, Nd or Nmo); "
+              f"treating it as unbounded", file=sys.stderr)
+        return None
+    return rule
 
 
 def prune_processed(retention=None, keep_ids=None, host=None, path=None):
