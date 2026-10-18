@@ -256,12 +256,21 @@ def original_size_for_target(target: str, path: Optional[str] = None) -> Optiona
     """
     entries = [e for e in _read_all_entries(path or get_history_path())
                if e.get("target") == target]
-    for key in ("baseline_size", "content_size"):
-        for entry in entries:  # entries are chronological; first wins
-            value = entry.get(key)
-            if value:
-                return value
+    for key in _ORIGINAL_SIZE_KEYS:
+        entry = _earliest_with(entries, key)
+        if entry is not None:
+            return entry[key]
     return None
+
+
+# Read in this order by original_size_for_target(); prune_history() keeps the entry each
+# one resolves to, so pruning can never move the cumulative-drift baseline.
+_ORIGINAL_SIZE_KEYS = ("baseline_size", "content_size")
+
+
+def _earliest_with(entries: List[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
+    """The first (chronological) entry carrying a truthy `key`, or None."""
+    return next((entry for entry in entries if entry.get(key)), None)
 
 
 def _read_all_entries(path: str) -> List[Dict[str, Any]]:
@@ -321,9 +330,9 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
                    archive_path: Optional[str] = None) -> None:
     """Prune the shared history file per SKILL_EVOLUTION_HISTORY_RETENTION.
 
-    Per target, always retains up to three anchor entries regardless of the configured
+    Per target, always retains up to five anchor entries regardless of the configured
     limit, on top of whatever the count/age window itself keeps -- so the retained count per
-    target can exceed the limit by up to two entries. That's intentional:
+    target can exceed the limit by up to four entries. That's intentional:
 
     - The most recent entry -- needed by optimize_skill.find_low_scoring_targets(), which
       wants exactly this and is otherwise unaffected by pruning.
@@ -332,9 +341,10 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
       baseline followed by several failing retries could have the passing entry pruned
       while the failures (chronologically newer) survive, silently disabling regression
       coverage for exactly the targets that most need it.
-    - The earliest entry -- original_size_for_target() reads it as the cumulative-drift
-      baseline. Without this anchor, trimming a target's oldest entries would silently
-      shift that baseline forward, forgiving prior drift.
+    - The earliest entry, plus the earliest entries carrying `baseline_size` and
+      `content_size` -- original_size_for_target() reads those as the cumulative-drift
+      baseline. Without them, trimming a target's oldest entries would silently shift that
+      baseline forward, forgiving prior drift.
 
     Anchors are deduplicated by identity when they coincide (e.g. a target with no failures
     has most-recent == last-passing).
@@ -379,6 +389,14 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
         if last_passing is not None:
             anchors.append(last_passing)
         anchors.append(target_entries[0])  # earliest
+        # The entries original_size_for_target() actually reads. The earliest entry is
+        # often sizeless -- a malformed, ambiguous or splice-refused attempt records no
+        # sizes -- so protecting only it let a count prune drop the first *sized* entry
+        # and silently move the cumulative baseline forward (1000B -> 1200B).
+        for key in _ORIGINAL_SIZE_KEYS:
+            sized = _earliest_with(target_entries, key)
+            if sized is not None:
+                anchors.append(sized)
 
         survivor_ids = {id(e) for e in survivors}
         for anchor in anchors:
