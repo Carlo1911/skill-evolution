@@ -62,9 +62,9 @@ class TestGetPreviousScore:
     def test_returns_most_recent_passing_score(self, tmp_path):
         """Should return the most recent passing score."""
         history = [
-            {"target": "skill:test", "score": 0.5, "passed": True, "timestamp": "2026-07-01T00:00:00Z"},
-            {"target": "skill:test", "score": 0.7, "passed": True, "timestamp": "2026-07-15T00:00:00Z"},
-            {"target": "skill:test", "score": 0.3, "passed": False, "timestamp": "2026-07-20T00:00:00Z"},
+            {"target": "skill:test", "score": 0.5, "passed": True, "subject": "installed", "timestamp": "2026-07-01T00:00:00Z"},
+            {"target": "skill:test", "score": 0.7, "passed": True, "subject": "installed", "timestamp": "2026-07-15T00:00:00Z"},
+            {"target": "skill:test", "score": 0.3, "passed": False, "subject": "installed", "timestamp": "2026-07-20T00:00:00Z"},
         ]
         
         with patch("evaluate.read_history") as mock_read:
@@ -76,9 +76,9 @@ class TestGetPreviousScore:
     def test_skips_failed_entries(self):
         """Should skip failed entries and find the most recent passing one."""
         history = [
-            {"target": "skill:test", "score": 0.8, "passed": True},
-            {"target": "skill:test", "score": 0.4, "passed": False},
-            {"target": "skill:test", "score": 0.3, "passed": False},
+            {"target": "skill:test", "score": 0.8, "passed": True, "subject": "installed"},
+            {"target": "skill:test", "score": 0.4, "passed": False, "subject": "installed"},
+            {"target": "skill:test", "score": 0.3, "passed": False, "subject": "installed"},
         ]
         
         with patch("evaluate.read_history") as mock_read:
@@ -86,6 +86,19 @@ class TestGetPreviousScore:
             result = skill_quality.get_previous_score("test")
         
         assert result == 0.8
+
+    def test_skips_scores_of_a_proposals_candidate(self):
+        """A proposal's candidate under the same key scored different text."""
+        history = [
+            {"target": "skill:test", "score": 0.6, "passed": True, "subject": "installed"},
+            {"target": "skill:test", "score": 1.0, "passed": True, "subject": "candidate"},
+        ]
+
+        with patch("evaluate.read_history") as mock_read:
+            mock_read.return_value = history
+            result = skill_quality.get_previous_score("test")
+
+        assert result == 0.6
 
 
 class TestEvaluateSkillQuality:

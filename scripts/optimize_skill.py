@@ -85,7 +85,7 @@ def is_enabled() -> bool:
     return os.environ.get(OPTIMIZER_ENABLED_ENV_VAR, "false").strip().lower() == "true"
 
 
-def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
+def find_low_scoring_targets(threshold: Optional[float] = None,
                               history_path: Optional[str] = None,
                               target_namespace: Optional[str] = "skill",
                               skipped: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
@@ -108,6 +108,14 @@ def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
     resolves (archived, ambiguous, gone) or whose installed text no longer matches the
     entry's `content_sha256` is dropped as well: the score describes text that is not
     there any more.
+
+    An entry is judged by the LLM judge's own score when it records one
+    (`judge.score`), against the judge's pass threshold: the combined score averages in
+    deterministic and regression results, and on the 2026-10-18 quality pass that lifted
+    the 8 skills the judge failed (0.57-0.68) to 0.78-0.84 combined, above
+    DEFAULT_LOW_SCORE_THRESHOLD, so none of them was listed. Entries without a judge score
+    keep the combined score and DEFAULT_LOW_SCORE_THRESHOLD. An explicit `threshold`
+    applies to both.
 
     `skipped`, when given, is filled with how many targets each rule dropped
     (`candidate_only`, `not_installed`, `changed_since`), so an empty list can be told apart
@@ -148,10 +156,20 @@ def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
             return False
         return True
 
+    judge_threshold = evaluate.env_float(evaluate.LLM_JUDGE_THRESHOLD_ENV_VAR,
+                                         evaluate.DEFAULT_LLM_JUDGE_THRESHOLD)
+
+    def scores_low(entry: Dict[str, Any]) -> bool:
+        judge_score = (entry.get("judge") or {}).get("score")
+        if judge_score is not None:
+            return judge_score < (judge_threshold if threshold is None else threshold)
+        limit = DEFAULT_LOW_SCORE_THRESHOLD if threshold is None else threshold
+        return entry.get("score", 1.0) < limit
+
     found = [
         entry for entry in latest_by_target.values()
         if matches_namespace(entry.get("target", ""))
-        and entry.get("score", 1.0) < threshold
+        and scores_low(entry)
         and entry.get("feedback")
         and still_describes_installed(entry)
     ]
@@ -758,9 +776,10 @@ def _print_candidates(targets: List[Dict[str, Any]]) -> None:
 
     for entry in targets:
         target = entry.get("target", "")
-        score = entry.get("score")
+        judge_score = (entry.get("judge") or {}).get("score")
+        score = f"judge={judge_score:.2f}" if judge_score is not None else f"score={entry.get('score')}"
         feedback = entry.get("feedback", "")
-        print(f"{target}\tscore={score}\t{feedback}")
+        print(f"{target}\t{score}\t{feedback}")
 
 
 def _run_skill(skill_name: str, iterations: Optional[int]) -> None:

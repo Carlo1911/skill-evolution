@@ -48,7 +48,8 @@ def test_the_judge_names_the_provider_in_the_chain_that_answered(chain):
 
     assert result.passed
     assert result.judge == {"provider": "ollama", "model": "m-local",
-                            "rubric_version": evaluate.JUDGE_RUBRIC_VERSION}
+                            "rubric_version": evaluate.JUDGE_RUBRIC_VERSION,
+                            "score": pytest.approx(0.9)}
 
 
 def test_a_malformed_answer_still_names_who_gave_it(monkeypatch, chain):

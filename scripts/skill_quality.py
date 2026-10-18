@@ -77,9 +77,11 @@ def get_previous_score(skill_name: str) -> Optional[float]:
     target = f"skill:{skill_name}"
     history = evaluate.read_history(target)
     
-    # Find the most recent passing entry
+    # Find the most recent passing measurement of the installed skill; a proposal's
+    # candidate under the same key scored different text.
     for entry in reversed(history):
-        if entry.get("passed") and entry.get("score") is not None:
+        if (entry.get("passed") and entry.get("score") is not None
+                and evaluate.entry_subject(entry) == evaluate.SUBJECT_INSTALLED):
             return entry["score"]
     
     return None

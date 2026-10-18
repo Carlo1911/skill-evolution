@@ -1355,6 +1355,11 @@ class LLMJudgeEvaluator(Evaluator):
             return failed
 
         threshold = env_float(LLM_JUDGE_THRESHOLD_ENV_VAR, DEFAULT_LLM_JUDGE_THRESHOLD)
+        if judge:
+            # The judge's own score, kept apart from the combined gate score: the combined
+            # mean also averages deterministic and regression results, which hid judge
+            # failures from the optimizer (a 0.57 judge score read as 0.78 combined).
+            judge = {**judge, "score": avg_score}
         return EvalResult(
             score=avg_score, passed=avg_score >= threshold, evaluator_name=self.name,
             feedback=parsed.get("feedback", ""), judge=judge,
@@ -1480,6 +1485,13 @@ class RegressionEvaluator(Evaluator):
         # attempt must never lower the bar a later attempt is compared against,
         # or a still-mediocre change could "pass" regression against a rejected score.
         passed_entries = [e for e in entries if e["passed"]]
+        # Compare like with like: a measurement of the installed skill against earlier
+        # measurements of it, a proposal's candidate against earlier candidates. Mixed, a
+        # quality pass "regressed" against a proposal's score (3 of 175 real skills), and
+        # every gate decision would start depending on the latest quality pass.
+        subject = context.get("subject")
+        if subject and str(target).startswith("skill:"):
+            passed_entries = [e for e in passed_entries if entry_subject(e) == subject]
         if not passed_entries:
             return EvalResult(
                 score=float(new_score), passed=True, evaluator_name=self.name,
@@ -2182,9 +2194,19 @@ def _evaluate_candidate(proposal: Any, candidate: Candidate) -> List[EvalResult]
     if candidate.baseline:
         context["baseline_size"] = len(candidate.baseline.encode("utf-8"))
 
+    # A candidate identical to the installed skill changes nothing: it is the installed
+    # text being measured (skill_quality.py's synthetic proposal), not a change. Its
+    # regression baseline must be another measurement of installed text, and cumulative
+    # drift does not apply -- that check bounds what *proposals* may do, while drift of the
+    # installed text happened outside the pipeline. Applied to quality passes it failed 6
+    # of 175 real skills on edits made by hand or by other tools (one grew from 295B to
+    # 1.5KB), and those 6 were the whole optimizer candidate list.
+    measures_installed = candidate.baseline_on_disk and candidate.content == candidate.baseline
+    context["subject"] = SUBJECT_INSTALLED if measures_installed else SUBJECT_CANDIDATE
+
     # Second reference point: where this target started, so drift spread across several
     # individually-compliant passes is still caught. Absent history leaves it inert.
-    original = original_size_for_target(target)
+    original = None if measures_installed else original_size_for_target(target)
     if original:
         context["original_size"] = original
 
