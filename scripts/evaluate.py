@@ -216,7 +216,9 @@ def append_history(target: str, result: EvalResult, session_ids: Optional[List[s
     `proposal:<id>` instead of folding it into the skill's lineage.
     """
     history_path = path or get_history_path()
-    os.makedirs(os.path.dirname(history_path), exist_ok=True)
+    # A bare file name has no directory part, and os.makedirs("") raises.
+    if os.path.dirname(history_path):
+        os.makedirs(os.path.dirname(history_path), exist_ok=True)
 
     entry = {
         "target": target,

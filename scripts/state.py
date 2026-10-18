@@ -161,7 +161,10 @@ def mark_processed(session_ids, host=None, path=None):
         }
 
     target = path or get_state_file()
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    # A bare file name (SKILL_EVOLUTION_STATE_FILE=state.json) has no directory part, and
+    # os.makedirs("") raises -- it resolves against the cwd, which already exists.
+    if os.path.dirname(target):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "w") as f:
         json.dump(state, f, indent=2)
 
@@ -306,6 +309,9 @@ def prune_processed(retention=None, keep_ids=None, host=None, path=None):
         **{k: v for k, v, b in survivors},
     }
     target = path or get_state_file()
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    # A bare file name (SKILL_EVOLUTION_STATE_FILE=state.json) has no directory part, and
+    # os.makedirs("") raises -- it resolves against the cwd, which already exists.
+    if os.path.dirname(target):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "w") as f:
         json.dump(new_state, f, indent=2)
