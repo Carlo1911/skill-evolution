@@ -129,6 +129,19 @@ def scan_skills(skills_dir: str = SKILLS_DIR, extra_roots: Optional[list] = None
     return results
 
 
+def find_duplicate_names(skills: list) -> dict:
+    """Map each skill name declared by more than one distinct file to its sorted real paths.
+
+    Records resolving to the same file (a symlinked twin) count once -- that is one
+    skill, not a conflict. Pure on purpose: scan_skills() runs on every skill-body
+    lookup, so only the CLI reports this, not the scan itself.
+    """
+    paths_by_name = {}
+    for skill in skills:
+        paths_by_name.setdefault(skill["name"], set()).add(os.path.realpath(skill["path"]))
+    return {name: sorted(paths) for name, paths in paths_by_name.items() if len(paths) > 1}
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Scan installed skills for the active host")
@@ -144,6 +157,11 @@ def main():
     import host as host_module
 
     skills = host_module.get_adapter().iter_skills(extra_roots=args.extra_root)
+
+    # stderr only: stdout is the JSON index other tooling parses, and it must not change.
+    for name, paths in find_duplicate_names(skills).items():
+        print(f"warning: skill name {name!r} is declared by {len(paths)} files: "
+              f"{', '.join(paths)}", file=sys.stderr)
 
     if args.name:
         skills = [s for s in skills if args.name.lower() in s["name"].lower()]

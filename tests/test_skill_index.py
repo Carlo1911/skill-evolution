@@ -1,5 +1,6 @@
 """Tests for scripts/skill_index.py's scan of the installed-skills tree."""
 
+import json
 import os
 import sys
 
@@ -68,6 +69,7 @@ def _write_flat_skill(root, name, description="does a thing"):
     (skill_dir / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nBody.\n"
     )
+    return skill_dir
 
 
 def test_scan_skills_extra_roots_flat_layout(tmp_path):
@@ -179,15 +181,6 @@ def test_scan_skills_no_extra_roots_identical_to_before(tmp_path):
     )
 
 
-def _write_flat_skill(root, name, description="does a thing"):
-    skill_dir = root / name
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nBody.\n"
-    )
-    return skill_dir
-
-
 def test_scan_skills_primary_root_indexes_flat_skills(tmp_path):
     """`<root>/<skill>/SKILL.md` directly under the primary root is a live skill.
 
@@ -252,3 +245,87 @@ def test_scan_skills_distinct_flat_and_nested_same_name_stay_ambiguous(tmp_path)
     assert sorted(s["description"] for s in found if s["name"] == "github") == [
         "flat copy", "nested copy",
     ]
+
+
+def _record(name, path):
+    return {"name": name, "category": "c", "description": "", "path": str(path), "size": 0}
+
+
+def test_find_duplicate_names_reports_distinct_files(tmp_path):
+    a = tmp_path / "a" / "SKILL.md"
+    b = tmp_path / "b" / "SKILL.md"
+    for p in (a, b):
+        p.parent.mkdir()
+        p.write_text("x")
+
+    dupes = skill_index.find_duplicate_names([_record("github", a), _record("github", b),
+                                              _record("solo", a)])
+
+    assert dupes == {"github": sorted([os.path.realpath(a), os.path.realpath(b)])}
+
+
+def test_find_duplicate_names_empty_when_names_are_unique(tmp_path):
+    records = [_record("one", tmp_path / "one"), _record("two", tmp_path / "two")]
+
+    assert skill_index.find_duplicate_names(records) == {}
+
+
+def test_find_duplicate_names_same_file_twice_is_not_a_conflict(tmp_path):
+    """Two records resolving to one file (e.g. via a symlink) are one skill."""
+    real = tmp_path / "store" / "SKILL.md"
+    real.parent.mkdir()
+    real.write_text("x")
+    link = tmp_path / "link"
+    os.symlink(real.parent, link)
+
+    records = [_record("handoff", real), _record("handoff", link / "SKILL.md")]
+
+    assert skill_index.find_duplicate_names(records) == {}
+
+
+def _run_main(monkeypatch, root, *argv):
+    """Run the real CLI against `root` through the Hermes adapter; return the index it
+    should print."""
+    real_scan = skill_index.scan_skills
+    monkeypatch.setenv("SKILL_EVOLUTION_HOST", "hermes")
+    monkeypatch.setattr(skill_index, "scan_skills",
+                        lambda skills_dir=str(root), extra_roots=None:
+                        real_scan(skills_dir, extra_roots))
+    monkeypatch.setattr(sys, "argv", ["skill_index.py", *argv])
+    skill_index.main()
+    return real_scan(str(root))
+
+
+def test_cli_warns_on_stderr_and_keeps_json_unchanged(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "skills"
+    flat = _write_flat_skill(root, "github", description="flat copy")
+    _write_skill(root, "software-development", "github", description="nested copy")
+    nested = root / "software-development" / "github"
+
+    expected = _run_main(monkeypatch, root)
+
+    out, err = capsys.readouterr()
+    assert json.loads(out) == expected
+    assert "warning:" in err and "github" in err
+    assert os.path.realpath(flat / "SKILL.md") in err
+    assert os.path.realpath(nested / "SKILL.md") in err
+
+
+def test_cli_without_conflicts_writes_nothing_to_stderr(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "skills"
+    _write_skill(root, "general-skills", "money-admin-messaging")
+
+    _run_main(monkeypatch, root)
+
+    assert capsys.readouterr().err == ""
+
+
+def test_scan_skills_itself_stays_silent_on_a_conflict(tmp_path, capsys):
+    """scan_skills() runs on every skill-body lookup, so the warning lives in main() only."""
+    root = tmp_path / "skills"
+    _write_flat_skill(root, "github", description="flat copy")
+    _write_skill(root, "software-development", "github", description="nested copy")
+
+    skill_index.scan_skills(str(root))
+
+    assert capsys.readouterr().err == ""
