@@ -1668,6 +1668,40 @@ def installed_skill_body(skill_name: str) -> Optional[str]:
     return host.get_adapter().read_skill_body(skill_name)
 
 
+def ambiguous_skill_paths(skill_name: str) -> List[str]:
+    """The distinct installed files declaring `skill_name`, when there is more than one.
+
+    Empty for a unique, missing or symlink-twinned name (find_duplicate_names() compares
+    real paths). installed_skill_body() returns None for an ambiguous name exactly as for
+    a missing one; this is how a caller tells them apart.
+    """
+    import host
+    import skill_index
+
+    return skill_index.find_duplicate_names(host.get_adapter().iter_skills()).get(skill_name, [])
+
+
+def _ambiguous_target_result(proposal: Any) -> Optional[EvalResult]:
+    """A failing `structure` result when the proposal's target skill is ambiguous.
+
+    Otherwise the gate would fall back to the analyzer's own old_value for the size
+    ratchet, the percentage guards and the anchor check -- proposal-supplied text in the
+    role of an observation -- and apply could not tell which file to change.
+    """
+    target_skill = getattr(proposal, "target_skill", None)
+    paths = ambiguous_skill_paths(target_skill) if target_skill else []
+    if not paths:
+        return None
+    return EvalResult(
+        score=0.0,
+        feedback=(f"ambiguous target: {len(paths)} installed files declare skill "
+                  f"'{target_skill}' ({', '.join(paths)}); resolve the conflict before "
+                  f"evaluating changes to it"),
+        passed=False,
+        evaluator_name="structure",
+    )
+
+
 def _resolve_baseline(proposal: Any, content_kind: str,
                       claimed: Optional[str]) -> Tuple[Optional[str], bool]:
     """Return the text a body change actually replaces, preferring disk over the proposal,
@@ -1788,6 +1822,10 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
             passed=False,
             evaluator_name="structure",
         )]
+
+    ambiguous = _ambiguous_target_result(proposal)
+    if ambiguous is not None:
+        return [ambiguous]
 
     context = {"content_kind": content_kind}
     # DeterministicEvaluator's growth-vs-baseline guard is inert unless it gets
@@ -2177,7 +2215,9 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         # later cumulative check nonsense (a real body would read as several-thousand-percent
         # growth). Omitting both sizes leaves the lookup skipping this entry.
         content, content_kind, claimed_old = _extract_evaluated_content(proposal)
-        if content_kind == MALFORMED_CONTENT_KIND:
+        # An ambiguous target was refused before any baseline was read; sizing it now
+        # would record the analyzer's own old_value as where the skill started.
+        if content_kind == MALFORMED_CONTENT_KIND or _ambiguous_target_result(proposal) is not None:
             _record_target("skill", target, skill_results, kind="skill_text")
         else:
             baseline, _ = _resolve_baseline(proposal, content_kind, claimed_old)

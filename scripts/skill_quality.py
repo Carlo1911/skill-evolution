@@ -115,7 +115,12 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
     # Get the installed skill body
     skill_body = evaluate.installed_skill_body(skill_name)
     if skill_body is None:
-        print(f"warning: skill '{skill_name}' not found or unreadable", file=sys.stderr)
+        paths = evaluate.ambiguous_skill_paths(skill_name)
+        if paths:
+            print(f"warning: skill '{skill_name}' is ambiguous ({len(paths)} installed files: "
+                  f"{', '.join(paths)}); skipped", file=sys.stderr)
+        else:
+            print(f"warning: skill '{skill_name}' not found or unreadable", file=sys.stderr)
         return None
     
     # Get previous score before evaluation
