@@ -101,6 +101,7 @@ python3 scripts/skill_index.py > /tmp/skills.json
 # 3. Inspect what got proposed
 python3 scripts/proposal.py --list
 python3 scripts/proposal.py --show 20260804-001
+python3 scripts/proposal.py --validate proposals/20260804-001.md   # exit 1 if it cannot be applied as written
 
 # 4. Review the proposal file and, if you agree with it, approve it by hand:
 #    edit proposals/20260804-001.md, change `status: proposed` to `status: approved`

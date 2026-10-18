@@ -171,6 +171,16 @@ python3 scripts/proposal_diagnostics.py --format json  # same, machine-readable
 
 It never changes a file. Each proposal gets one state — `unreadable`, `duplicate_id` (several files claim one proposal id), `incomplete` (empty change, non-skill field, placeholder `create_new`), `ambiguous` (two installed files share the target name), `archived`, `unresolved` (neither installed nor archived — not the same as nonexistent), `stale` (its `old_value` no longer matches the installed skill), or `valid` — plus every other reason that applies, and possible-duplicate flags from plain text rules.
 
+To record your decision on each pending proposal with a reason, for later comparison
+against any automated prioritization, label them interactively:
+
+```bash
+python3 scripts/review_labels.py --next     # useful / harmful / duplicate / incomplete / obsolete / unsure
+python3 scripts/review_labels.py --stats    # what is labeled, by split and by state
+```
+
+Labels go to `labels/review_labels.jsonl` (local-only); a proposal's `status` is never changed.
+
 ### 4. Auto-Apply (Opt-In)
 
 By default, proposals are **review-only**. Enable auto-apply:
@@ -287,6 +297,7 @@ This skill ships with ready-to-use scripts. On first load, the agent checks if t
 | `scripts/analyze.py` | Format NDJSON sessions for LLM consumption |
 | `scripts/proposal.py` | Proposal schema, I/O, and `apply_proposal()` logic |
 | `scripts/proposal_diagnostics.py` | Read-only diagnostic of the proposal queue: state, reasons and possible duplicates per pending proposal |
+| `scripts/review_labels.py` | Human labels (with reasons) for pending proposals, stored apart from the proposals, with a fixed design/holdout split |
 | `scripts/evaluate.py` | Evaluation gate: deterministic + LLM-judge + regression + opt-in `human_review` evaluators, versioned history |
 | `scripts/host.py` | `HostAdapter` ABC + `HermesAdapter` + `ClaudeCodeAdapter`. Routes session/skill reads and proposal writes through the active host |
 | `scripts/optimize_skill.py` | Optional GEPA optimizer — runs a real `gepa.optimize_anything()` loop over a skill's own session history (needs the `gepa` extra) |
@@ -381,7 +392,9 @@ python3 scripts/fetch_sessions.py --prune-state    # prune processed-session sta
 python3 scripts/proposal.py --example              # print an example proposal
 python3 scripts/proposal.py --list                 # list current proposals
 python3 scripts/proposal.py --show <id>            # show one proposal
+python3 scripts/proposal.py --validate <file|id>   # check a proposal file; exit 1 unless it can be reviewed and applied
 python3 scripts/proposal_diagnostics.py            # read-only queue diagnostic (--all, --format json)
+python3 scripts/review_labels.py --next            # label pending proposals by hand (--stats, --export)
 
 # --- Evaluation gate ---
 python3 scripts/evaluate.py --list-evaluators      # show the resolved evaluator set
@@ -433,7 +446,7 @@ python3 scripts/skill_quality.py --format json                   # JSON output i
 | `SKILL_EVOLUTION_FASTEMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Model name for the `fastembed` backend. Models are cached in `~/.cache/fastembed/` |
 | `SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD` | `0.90` | Max cosine similarity before flagging as duplicate (higher = stricter) |
 | `SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD` | `0.90` | Min length-weighted similarity between new and installed body windows before flagging as drift (higher = stricter) |
-| `SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD` | `0.60` | Min average cosine similarity for grounding check (lower = stricter) |
+| `SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD` | `0.74` | Min weighted similarity between a proposal's new text and the sessions it cites (higher = stricter); calibrated on real proposals |
 | `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude`, `ollama`, `lmstudio`, `opencode`, `openai`, or `gemini`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER`. May be a comma-separated fallback chain (e.g. `claude,opencode,ollama`) — permanent errors (401/403, missing key, unknown provider, malformed response) skip to the next provider; transient errors (timeout, 5xx, 429) retry within each provider before moving on; fails closed only when every provider in the chain is exhausted |
 | `SKILL_EVOLUTION_PROVIDER_TIMEOUT` | `60` | HTTP timeout (seconds) for every provider call — one generic knob, since the latency it exists for is a property of the model, not the adapter. Raise it for local reasoning models, which spend much of their output on chain-of-thought before the JSON |
 | `SKILL_EVOLUTION_PROVIDER_RETRIES` | `2` | Retries *after* the first attempt for transient transport failures (HTTP 408/429/5xx, timeouts, connection errors). `0` disables retry and restores strict fail-fast. Auth/4xx and malformed responses are never retried |
@@ -457,6 +470,7 @@ python3 scripts/skill_quality.py --format json                   # JSON output i
 | `SKILL_EVOLUTION_HISTORY_ARCHIVE_PATH` | sibling of the history file (`eval_history.archive.jsonl`) | Where entries pruned by the above are moved, not deleted |
 | `SKILL_EVOLUTION_PROPOSALS_DIR` | `proposals/` (repo root) | Where proposals are written |
 | `SKILL_EVOLUTION_QUALITY_REPORT_DIR` | `reports/` (repo root) | Where the skill-quality cron wrapper writes its timestamped report. The `skill-quality-report.sh` wrapper honors this; `--output` on `skill_quality.py` overrides per-run |
+| `SKILL_EVOLUTION_LABELS_PATH` | `labels/review_labels.jsonl` (cwd) | Where `review_labels.py` appends human labels |
 | `SKILL_EVOLUTION_DB_PATH` | per-host (Hermes: `~/.hermes/state.db`) | Session database the `tool_calls` / `analyzer_prompt` targets read. `fetch_sessions.py` takes `--db-path` instead; this covers the in-process callers that have no flag to thread a path through |
 | `SKILL_EVOLUTION_STATE_FILE` | per-host (see below) | Universal override for processed-session state. Each host defaults to its own location: Hermes → `~/.hermes/skill_evolution_state.json`, Claude Code → `<SKILL_EVOLUTION_CLAUDE_CODE_HOME>/skill_evolution_state.json`. When set, redirects whichever host is active |
 | `SKILL_EVOLUTION_STATE_RETENTION` | unbounded | Max processed-session entries (bare int) or age (`90d`, `6mo`); flat-dict state shape only (see below); applies automatically, and via `fetch_sessions.py --prune-state`; an invalid value warns and is treated as unbounded |
