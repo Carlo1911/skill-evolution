@@ -565,13 +565,17 @@ def contains_secret(text: str) -> bool:
     return any(regex.search(text) for regex in SECRET_REGEXES)
 
 
-def _summarize_messages(messages) -> tuple:
+def _summarize_messages(messages, full_content: bool = False) -> tuple:
     """Redact, truncate, and shape a session's message rows.
 
     Shared by fetch_sessions() and sessions_for_skill(): both need the same
     per-message secret redaction (contains_secret()), MAX_MESSAGE_CHARS
     truncation, and {role, content_preview, content_length} shape, and the
     same user/assistant role counts. Returns (msg_summary, user_msgs, asst_msgs).
+
+    `full_content` adds the redacted, MAX_MESSAGE_CHARS-truncated text as `content`
+    next to the 500-char preview -- for the grounding check, which compares a proposed
+    change with what the sessions actually said.
     """
     msg_summary = []
     user_msgs = 0
@@ -594,11 +598,14 @@ def _summarize_messages(messages) -> tuple:
         if len(content) > MAX_MESSAGE_CHARS:
             content = content[:MAX_MESSAGE_CHARS] + "\n[...truncated]"
 
-        msg_summary.append({
+        summary = {
             "role": role,
             "content_preview": content[:500],
             "content_length": len(content),
-        })
+        }
+        if full_content:
+            summary["content"] = content
+        msg_summary.append(summary)
 
     return msg_summary, user_msgs, asst_msgs
 
@@ -799,6 +806,53 @@ def _session_db_is_readable(db_path: str) -> bool:
               f"treating as no history", file=sys.stderr)
         return False
     return True
+
+
+SESSIONS_BY_ID_QUERY = """
+    SELECT id, started_at, model, title, source
+    FROM sessions
+    WHERE id IN ({placeholders})
+"""
+
+
+def sessions_by_id(session_ids: List[str], db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The given sessions, redacted, with full message text, in `session_ids` order.
+
+    For evidence lookups (the grounding check): no processed-state, lookback or cron
+    filter, since the sessions a proposal cites are exactly ones already processed.
+    Unknown ids are skipped. An unreadable DB yields [] with a stderr warning, checked
+    before connecting so a missing path is never created (see _session_db_is_readable()).
+    """
+    ids = [sid for sid in dict.fromkeys(session_ids or []) if sid]
+    db_path = db_path or get_state_db_path()
+    if not ids or not _session_db_is_readable(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = {row["id"]: row for row in conn.execute(
+            SESSIONS_BY_ID_QUERY.format(placeholders=",".join("?" * len(ids))), ids)}
+        results = []
+        for sid in ids:
+            row = rows.get(sid)
+            if row is None:
+                continue
+            messages = conn.execute(MESSAGE_QUERY, (sid,)).fetchall()
+            msg_summary, user_msgs, asst_msgs = _summarize_messages(messages, full_content=True)
+            results.append({
+                "session_id": sid,
+                "started_at": row["started_at"],
+                "title": row["title"] or "",
+                "model": row["model"] or "",
+                "source": row["source"] or "",
+                "message_count": len(messages),
+                "user_messages": user_msgs,
+                "assistant_messages": asst_msgs,
+                "messages": msg_summary,
+            })
+        return results
+    finally:
+        conn.close()
 
 
 def sessions_for_skill(skill_name: str, db_path: str = DEFAULT_DB_PATH,

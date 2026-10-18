@@ -36,6 +36,10 @@ import state
 
 # ── Adapter interface ────────────────────────────────────────────────
 
+# A Claude Code session id as it appears in a transcript file name.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
 class HostAdapter(ABC):
     """Base interface every host adapter implements.
 
@@ -103,6 +107,17 @@ class HostAdapter(ABC):
                 return f.read()
         except OSError:
             return None
+
+    def read_sessions(self, session_ids: List[str]) -> List[Dict[str, Any]]:
+        """The sessions with these ids, in iter_sessions()'s dict shape, already redacted,
+        each message also carrying its full (redacted, truncated) text as `content`.
+
+        For evidence lookups -- the grounding check compares a proposal's new text with
+        the sessions it cites -- so processed state and lookback windows do not apply.
+        Unknown ids are skipped; never raises. Concrete with an empty default: a host that
+        cannot look sessions up has no evidence to offer, and its callers abstain.
+        """
+        return []
 
     def iter_archived_skills(self) -> List[Dict[str, Any]]:
         """Return this host's archived (retired) skills, in iter_skills()'s record shape.
@@ -324,6 +339,13 @@ class HermesAdapter(HostAdapter):
             # not whatever the env var says right now.
             host=self.name,
         )
+
+    def read_sessions(self, session_ids: List[str]) -> List[Dict[str, Any]]:
+        try:
+            return fetch_sessions.sessions_by_id(session_ids)
+        except Exception as e:  # noqa: BLE001 -- evidence lookup must never raise
+            print(f"warning: could not read sessions {session_ids}: {e}", file=sys.stderr)
+            return []
 
     def iter_skills(self, extra_roots: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         # Only pass extra_roots when non-empty: old code called scan_skills() with no
@@ -809,8 +831,26 @@ class ClaudeCodeAdapter(HostAdapter):
 
         return results
 
+    def read_sessions(self, session_ids: List[str]) -> List[Dict[str, Any]]:
+        projects_dir = Path(_resolve_claude_code_home()) / "projects"
+        results = []
+        for sid in dict.fromkeys(session_ids or []):
+            # An id becomes a file name: refuse anything that could leave projects/.
+            if not sid or not _SESSION_ID_RE.fullmatch(sid) or ".." in sid:
+                continue
+            for path in sorted(projects_dir.glob(f"*/{sid}.jsonl")):
+                try:
+                    session = self._parse_session_file(path, None, full_content=True)
+                except OSError as e:
+                    print(f"warning: could not read {path}: {e}", file=sys.stderr)
+                    continue
+                if session is not None:
+                    results.append(session)
+                    break
+        return results
+
     def _parse_session_file(
-        self, path: Path, since_epoch: Optional[float]
+        self, path: Path, since_epoch: Optional[float], full_content: bool = False
     ) -> Optional[Dict[str, Any]]:
         """Parse one session's JSONL file into a session dict, or None to signal "skip
         this file entirely" -- either it had zero parseable records (a genuinely empty
@@ -912,7 +952,8 @@ class ClaudeCodeAdapter(HostAdapter):
         # Reuse the shared summarizer directly rather than reimplementing truncation,
         # secret-dropping, or PII-masking -- it only ever reads msg["role"]/msg["content"],
         # which is exactly the flattened shape built above.
-        msg_summary, user_msgs, asst_msgs = fetch_sessions._summarize_messages(messages)
+        msg_summary, user_msgs, asst_msgs = fetch_sessions._summarize_messages(
+            messages, full_content=full_content)
 
         return {
             "session_id": session_id,

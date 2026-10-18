@@ -2109,6 +2109,26 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     return _evaluate_candidate(proposal, _build_candidate(proposal))
 
 
+def _proposed_new_text(proposal: Any) -> str:
+    """The text a proposal adds: its body/description changes' new values, joined. What
+    the grounding check compares with the sessions -- the rest of the skill predates the
+    proposal and says nothing about whether this change is supported."""
+    return "\n\n".join(
+        c.new_value for c in getattr(proposal, "proposed_changes", None) or []
+        if getattr(c, "field", None) in ("body", "description") and c.new_value)
+
+
+def _cited_session_texts(proposal: Any) -> List[str]:
+    """Message texts of the sessions `proposal` cites, via the active host adapter."""
+    ids = list(getattr(proposal, "session_ids", None) or [])
+    if not ids:
+        return []
+    import host
+    sessions = host.get_adapter().read_sessions(ids)
+    return [m.get("content") or m.get("content_preview", "")
+            for s in sessions for m in s.get("messages", [])]
+
+
 def _evaluate_candidate(proposal: Any, candidate: Candidate) -> List[EvalResult]:
     """Run the skill target's evaluators over an already-built Candidate."""
     target = target_key_for_proposal(proposal)
@@ -2169,6 +2189,12 @@ def _evaluate_candidate(proposal: Any, candidate: Candidate) -> List[EvalResult]
         elif (candidate.kind == "body"
               and getattr(getattr(proposal, "type", None), "value", None) == "create_new"):
             context["existing_skills"] = _installed_skills_for_comparison()
+        # Grounding: is the new text supported by the sessions the proposal cites? Read
+        # through the host adapter (already redacted); no cited sessions, no key.
+        session_texts = _cited_session_texts(proposal)
+        if session_texts:
+            context["sessions"] = session_texts
+            context["grounding_text"] = _proposed_new_text(proposal)
 
     return run_evaluators(candidate.content, target, context=context)
 

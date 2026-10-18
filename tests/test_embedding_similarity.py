@@ -166,7 +166,7 @@ class TestEmbeddingSimilarityEvaluator:
     def test_grounding_check_pass(self, evaluator, mock_backend):
         """Test grounding check passes when similarity is above threshold."""
         # Mock embeddings: content is well grounded in sessions
-        # Using vectors that will have high cosine similarity (> 0.60)
+        # Using vectors that will have high cosine similarity (> 0.74)
         mock_backend.embed.side_effect = [
             [[1.0, 0.2, 0.0]],  # content embedding
             [[1.0, 0.0, 0.0], [1.0, 0.1, 0.0]]  # session embeddings (similar)
@@ -178,12 +178,12 @@ class TestEmbeddingSimilarityEvaluator:
         )
         
         assert result.passed is True
-        assert result.score > 0.60  # Above grounding threshold
+        assert result.score > 0.74  # Above grounding threshold
     
     def test_grounding_check_fail(self, evaluator, mock_backend):
         """Test grounding check fails when similarity is below threshold."""
         # Mock embeddings: content is not grounded in sessions
-        # Using vectors that will have low cosine similarity (< 0.60)
+        # Using vectors that will have low cosine similarity (< 0.74)
         mock_backend.embed.side_effect = [
             [[1.0, 0.0, 0.0]],  # content embedding
             [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]  # session embeddings (orthogonal)
@@ -195,7 +195,7 @@ class TestEmbeddingSimilarityEvaluator:
         )
         
         assert result.passed is False
-        assert result.score < 0.60  # Below grounding threshold
+        assert result.score < 0.74  # Below grounding threshold
         assert "ground" in result.feedback.lower()
     
     def test_empty_existing_skills(self, evaluator):

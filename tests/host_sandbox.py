@@ -46,6 +46,7 @@ class Sandbox:
             )
             monkeypatch.setattr(skill_index, "SKILLS_DIR", skills_root)
             monkeypatch.setenv(fetch_sessions.STATE_FILE_ENV_VAR, str(self.state_file))
+            monkeypatch.setenv(fetch_sessions.DB_PATH_ENV_VAR, str(self.db_path))
             self._init_db()
         else:
             self.skills_root = root / "skills"
@@ -85,25 +86,30 @@ class Sandbox:
         conn.commit()
         conn.close()
 
-    def add_sessions(self, sessions: Iterable[Tuple[str, float]]) -> None:
-        """Add (session_id, started_at_epoch) sessions with one user message each."""
+    def add_sessions(self, sessions: Iterable[Tuple]) -> None:
+        """Add sessions as (session_id, started_at_epoch) -- one user message, "hola" -- or
+        (session_id, started_at_epoch, [(role, content), ...])."""
+        sessions = [(s[0], s[1], s[2] if len(s) > 2 else [("user", "hola")]) for s in sessions]
         if self.name == "hermes":
             conn = sqlite3.connect(self.db_path)
-            for sid, ts in sessions:
+            for sid, ts, messages in sessions:
                 conn.execute("INSERT INTO sessions (id, source, model, title, started_at) "
                              "VALUES (?, 'cli', 'm', 't', ?)", (sid, ts))
-                conn.execute("INSERT INTO messages (session_id, role, content, timestamp) "
-                             "VALUES (?, 'user', 'hola', ?)", (sid, ts))
+                for i, (role, content) in enumerate(messages):
+                    conn.execute("INSERT INTO messages (session_id, role, content, timestamp) "
+                                 "VALUES (?, ?, ?, ?)", (sid, role, content, ts + i))
             conn.commit()
             conn.close()
             return
         project = self.root / "projects" / "p"
         project.mkdir(parents=True, exist_ok=True)
-        for sid, ts in sessions:
-            stamp = datetime.fromtimestamp(ts, timezone.utc).isoformat()
-            record = {"type": "user", "sessionId": sid, "timestamp": stamp,
-                      "message": {"role": "user", "content": "hola"}}
-            (project / f"{sid}.jsonl").write_text(json.dumps(record) + "\n")
+        for sid, ts, messages in sessions:
+            lines = []
+            for i, (role, content) in enumerate(messages):
+                stamp = datetime.fromtimestamp(ts + i, timezone.utc).isoformat()
+                lines.append(json.dumps({"type": role, "sessionId": sid, "timestamp": stamp,
+                                         "message": {"role": role, "content": content}}))
+            (project / f"{sid}.jsonl").write_text("\n".join(lines) + "\n")
 
     def mark_processed(self, session_ids) -> None:
         self.adapter.mark_processed(list(session_ids))
