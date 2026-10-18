@@ -132,8 +132,11 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
         if not results:
             return None
         
+        # Abstentions ("not applicable") count neither in the mean nor in the verdict.
+        scored = evaluate.applicable(results)
+
         # Calculate mean score
-        scores = [r.score for r in results if r.score is not None]
+        scores = [r.score for r in scored if r.score is not None]
         if not scores:
             return None
         
@@ -147,7 +150,7 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
                 break
         
         # Check if passed (all evaluators must pass in strict mode)
-        passed = all(r.passed for r in results if r.score is not None)
+        passed = all(r.passed for r in scored if r.score is not None)
         
         # Record the evaluation in history
         target = f"skill:{skill_name}"

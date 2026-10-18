@@ -48,6 +48,24 @@ class EvalResult:
     # site keeps its meaning; the flag exists so history consumers (a human reviewer,
     # find_low_scoring_targets) can tell a score=0.0 outage from a genuine regression.
     transport_failure: bool = False
+    # True when the evaluator had nothing to compare for this content (e.g. no baseline
+    # for a drift check). Recorded and shown as `n/a`, but excluded from the gate decision
+    # and from every mean score -- see applicable(). Distinct from a failure: an evaluator
+    # that tries and errors still fails closed. score/passed mirror "no evaluator" (1.0,
+    # pass) so a reader that ignores the flag sees what an absent evaluator would give.
+    not_applicable: bool = False
+
+
+def applicable(results: List["EvalResult"]) -> List["EvalResult"]:
+    """The results that count: everything except `not_applicable` abstentions."""
+    return [r for r in results if not r.not_applicable]
+
+
+def _verdict(result: "EvalResult") -> str:
+    """`pass` / `fail` / `n/a`, the token used in combined gate feedback."""
+    if result.not_applicable:
+        return "n/a"
+    return "pass" if result.passed else "fail"
 
 
 # ── Evaluator interface ─────────────────────────────────────────────
@@ -71,6 +89,11 @@ class Evaluator(ABC):
         """
         return EvalResult(score=0.0, passed=False, evaluator_name=self.name,
                           feedback=feedback, transport_failure=transport_failure)
+
+    def _not_applicable(self, reason: str) -> EvalResult:
+        """Build an abstention: this evaluator had nothing to compare for this content."""
+        return EvalResult(score=1.0, passed=True, evaluator_name=self.name,
+                          feedback=f"not applicable: {reason}", not_applicable=True)
 
 
 # ── Registry (plain name -> class dict, no dynamic discovery) ───────
@@ -195,6 +218,8 @@ def append_history(target: str, result: EvalResult, session_ids: Optional[List[s
         # appears when actually set -- history consumers can't confuse an explicit False
         # with pre-flag data, and the line stays one field lean for the common case.
         entry.pop("transport_failure", None)
+    if not entry.get("not_applicable"):
+        entry.pop("not_applicable", None)
 
     with open(history_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -1374,7 +1399,7 @@ class HumanReviewEvaluator(Evaluator):
         if prior_results:
             print("\nAutomatic evaluator verdicts:")
             for r in prior_results:
-                status = "pass" if r.passed else "fail"
+                status = _verdict(r)
                 print(f"  - {r.evaluator_name}: {status} (score {r.score:.3f})")
                 if r.feedback:
                     print(f"      {r.feedback}")
@@ -1457,7 +1482,8 @@ def run_evaluators(content: str, target: str, context: Optional[Dict[str, Any]] 
     results: List[EvalResult] = [_run_one(e, content, base_context) for e in automatic]
 
     if regression_evaluators or human_review_evaluators:
-        aggregate_score = sum(r.score for r in results) / len(results) if results else 0.0
+        scored = applicable(results)
+        aggregate_score = sum(r.score for r in scored) / len(scored) if scored else 0.0
         post_context = dict(base_context)
         post_context["new_score"] = aggregate_score
         results.extend(_run_one(e, content, post_context) for e in regression_evaluators)
@@ -1491,7 +1517,12 @@ def resolve_gate_strictness(proposal_type: str, target: Optional[str] = None) ->
 
 
 def combine_gate(results: List[EvalResult], strictness: str) -> bool:
-    """Combine evaluator results per `strictness`. No configured evaluators never blocks (today's behavior)."""
+    """Combine evaluator results per `strictness`. No configured evaluators never blocks (today's behavior).
+
+    `not_applicable` abstentions are left out before combining, so they neither block nor
+    tip a majority; a target where every evaluator abstained behaves like one with none.
+    """
+    results = applicable(results)
     if not results:
         return True
     if strictness == "strict":
@@ -2064,11 +2095,12 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         # transport-caused: a human reviewer (and find_low_scoring_targets) must be able
         # to tell an outage-driven 0.0 from a genuine regression.
         transport_failure = any(getattr(r, "transport_failure", False) for r in results)
-        score = sum(r.score for r in results) / len(results) if results else 1.0
+        scored = applicable(results)
+        score = sum(r.score for r in scored) / len(scored) if scored else 1.0
         score_sum += score
         score_count += 1
         feedback = (
-            "; ".join(f"{label}/{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results)
+            "; ".join(f"{label}/{r.evaluator_name}={_verdict(r)}" for r in results)
             or "no evaluators configured"
         )
         feedback_parts.append(feedback)
@@ -2224,11 +2256,12 @@ def _cli_gate_result(results: List[EvalResult]) -> EvalResult:
     does: without it a provider outage during `--eval-target ...` is recorded as a
     content failure.
     """
+    scored = applicable(results)
     return EvalResult(
-        score=sum(r.score for r in results) / len(results) if results else 0,
-        passed=all(r.passed for r in results),
+        score=sum(r.score for r in scored) / len(scored) if scored else 0,
+        passed=all(r.passed for r in scored),
         evaluator_name="gate",
-        feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
+        feedback="; ".join(f"{r.evaluator_name}={_verdict(r)}" for r in results),
         transport_failure=any(getattr(r, "transport_failure", False) for r in results),
     )
 
