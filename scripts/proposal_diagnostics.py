@@ -246,6 +246,29 @@ def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -
     return results
 
 
+def validate_paths(paths: List[str]) -> List[Dict[str, Any]]:
+    """Diagnose each file in `paths` against the rest of its own directory, whatever its
+    status -- the same rules diagnose_queue() applies, one result per requested path.
+
+    What `proposal.py --validate` runs, so the analyzer can check the file it just wrote
+    with the exact rules a reviewer's diagnostic will apply later. A path that is missing
+    or not a `*.md` file reads as unreadable.
+    """
+    by_dir: Dict[str, List[str]] = defaultdict(list)
+    for path in paths:
+        by_dir[os.path.dirname(os.path.abspath(path))].append(os.path.basename(path))
+    results = []
+    for directory, names in by_dir.items():
+        diags = {d["file"]: d for d in diagnose_queue(directory, include_all=True)}
+        for name in names:
+            results.append(diags.get(name) or {
+                "file": name, "proposal_id": None, "type": None, "target": None, "status": None,
+                "state": "unreadable",
+                "reasons": [{"code": "unreadable", "detail": "no such *.md proposal file"}],
+                "possible_duplicates": []})
+    return results
+
+
 def _render_text(diags: List[Dict[str, Any]]) -> str:
     states = defaultdict(int)
     reason_counts = defaultdict(int)

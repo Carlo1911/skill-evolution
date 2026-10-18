@@ -56,15 +56,52 @@ Proposal files (markdown) ──► review ──► auto-apply (opt-in)
 Each proposal is a structured markdown file with YAML frontmatter:
 
 ```yaml
+---
 proposal_id: 20260723-001
 type: improve_existing
 target_skill: debugging-and-error-recovery
 confidence: 0.85
+summary: Add FastAPI exception-handler patterns
 status: proposed
+session_ids:
+  - 20260723_101500_ab12cd
 proposed_changes:
   - field: body
-    description: Add FastAPI exception-handler patterns section
+    old_value: |-
+      ## Common Failures
+
+      - Import errors after a dependency upgrade
+    new_value: |-
+      ## Common Failures
+
+      - Import errors after a dependency upgrade
+      - FastAPI 500s with an empty body: an exception escaped every handler; register
+        `@app.exception_handler(Exception)` and log `request.url` before re-raising
+    description: Add FastAPI exception-handler patterns
+---
 ```
+
+### Writing a proposal file
+
+A proposal is evaluated and applied from its `proposed_changes`, never from the prose
+below the frontmatter. A change without the actual text cannot be scored or applied, and
+the queue diagnostic reports it as `incomplete`.
+
+- **Every `body` change carries `old_value` and `new_value`.** `old_value` is an exact
+  excerpt of the installed `SKILL.md` that occurs **exactly once** in it. `new_value` is
+  the complete text that replaces it. Read the installed skill first and copy the anchor
+  from it; do not retype it from memory.
+- **To add a section**, anchor on the line(s) next to where it goes, and repeat that
+  anchor in `new_value` followed by the new text, as in the example above.
+- **A `create_new` proposal** carries the full new `SKILL.md`, frontmatter included, as
+  the `new_value` of a `field: body` change, plus a `field: name` change with the name.
+- **Multi-line values use a literal block**: `old_value: |-` / `new_value: |-`, with every
+  line of the value indented by exactly 6 spaces. Use `|-`, not `|`, so no trailing newline
+  is added to an anchor.
+- **Validate before you finish.** After writing each file, run
+  `python3 scripts/proposal.py --validate <file>` from the skill repo. Exit 1 means the
+  file cannot be reviewed or applied as written: fix it (the output names the problem),
+  or delete it. Do not leave a file that fails validation.
 
 ## Quick Start
 

@@ -303,6 +303,10 @@ def _encode_frontmatter_value(value: str) -> str:
     return value
 
 
+# Indentation of a literal block's lines under a change's `old_value: |-` key.
+BLOCK_INDENT = " " * 6
+
+
 def _decode_frontmatter_value(value: str) -> str:
     """Reverse _encode_frontmatter_value(); a value with no "b64:" prefix is returned as-is."""
     if value.startswith("b64:"):
@@ -322,15 +326,45 @@ def _parse_frontmatter(text: str) -> dict:
         list_key = None
         list_items = []
 
+    def flush_block():
+        """Store an open literal block (`old_value: |-`) into the current change."""
+        nonlocal block_key, block_lines
+        if block_key is None:
+            return
+        while block_lines and block_lines[-1] == "":
+            block_lines.pop()
+        value = "\n".join(block_lines)
+        if block_keep_newline and block_lines:
+            value += "\n"
+        change_block[block_key] = value
+        block_key = None
+        block_lines = []
+
     data = {}
     list_key = None
     list_items = []
     in_list = False
     change_block = None
     in_change = False
+    # A literal block (`new_value: |` or `|-`) holds its lines indented 6 spaces under
+    # the change. An agent writing a proposal by hand has no other way to express a
+    # multi-line anchor or replacement: the single-line form cannot hold a newline, and
+    # b64 is only what save_proposal() writes.
+    block_key = None
+    block_lines: list = []
+    block_keep_newline = False
 
     for line in text.split("\n"):
         line_stripped = line.strip()
+
+        if block_key is not None:
+            if line_stripped == "":
+                block_lines.append("")
+                continue
+            if line.startswith(BLOCK_INDENT):
+                block_lines.append(line[len(BLOCK_INDENT):])
+                continue
+            flush_block()
 
         # A new change-block entry ("  - field: ...") closes any open block list
         # before starting its own block. It must be handled before list
@@ -353,6 +387,12 @@ def _parse_frontmatter(text: str) -> dict:
             if len(kv) == 2:
                 change_key = kv[0].strip()
                 change_value = kv[1].strip().strip('"')
+                if change_key in ("old_value", "new_value") and change_value in ("|", "|-"):
+                    # Read literally: block content is never b64-decoded.
+                    block_key = change_key
+                    block_lines = []
+                    block_keep_newline = change_value == "|"
+                    continue
                 if change_key in ("old_value", "new_value"):
                     change_value = _decode_frontmatter_value(change_value)
                 change_block[change_key] = change_value
@@ -399,6 +439,7 @@ def _parse_frontmatter(text: str) -> dict:
         data[key] = value
 
     # Close open structures
+    flush_block()
     if in_list and list_key:
         data[list_key] = list_items
     if in_change and change_block:
@@ -630,14 +671,52 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
     return result
 
 
+def _validate_cli(targets: List[str]) -> int:
+    """Run `--validate`: print each file's state and reasons; 0 only when all are valid.
+
+    A target that is not an existing path is looked up as a proposal id. Possible-duplicate
+    flags are printed as warnings and do not fail the check: they are heuristics for a
+    reviewer, not a defect in the file.
+    """
+    # Imported here: proposal_diagnostics imports this module at its top.
+    import proposal_diagnostics
+
+    paths, failures = [], 0
+    for target in targets:
+        if os.path.exists(target):
+            paths.append(target)
+            continue
+        try:
+            paths.append(find_proposal_file(target, get_proposals_dir()))
+        except (FileNotFoundError, ValueError) as e:
+            print(f"{target}: unreadable\n    {e}")
+            failures += 1
+    for d in proposal_diagnostics.validate_paths(paths) if paths else []:
+        print(f"{d['file']}: {d['state']}")
+        for r in d["reasons"]:
+            print(f"    {r['code']}: {r['detail']}")
+        for f in d["possible_duplicates"]:
+            other = f" ({f['other']})" if f["other"] else ""
+            print(f"    warning: possible duplicate{other}: {f['detail']}")
+        if d["state"] != "valid":
+            failures += 1
+    return 1 if failures else 0
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Skill evolution proposal tools")
     parser.add_argument("--example", action="store_true", help="Print example proposal")
     parser.add_argument("--list", action="store_true", help="List current proposals")
     parser.add_argument("--show", type=str, default=None, help="Show specific proposal by ID")
+    parser.add_argument("--validate", nargs="+", metavar="FILE_OR_ID", default=None,
+                        help="Check proposal files (paths, or ids in the proposals dir) with the "
+                             "queue diagnostic's rules; exit 1 unless every one is valid")
     args = parser.parse_args()
-    
+
+    if args.validate:
+        sys.exit(_validate_cli(args.validate))
+
     if args.example:
         proposal = SkillEvolutionProposal(
             proposal_id="example-001",
