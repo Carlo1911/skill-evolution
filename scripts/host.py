@@ -41,7 +41,8 @@ class HostAdapter(ABC):
     The read side is three methods — `iter_sessions()` for the analyzer's session
     evidence, `iter_skills()` for "what skills currently exist", and `read_skill_body()`
     for a single skill's installed text (used by the evaluation gate's baseline-size
-    lookup, see evaluate.installed_skill_body()). The write side is two more attributes
+    lookup, see evaluate.installed_skill_body()); `iter_archived_skills()` adds the retired
+    skills, so "archived" and "unresolved" stay distinguishable. The write side is two more attributes
     (P2-2): `supports_write` says whether this host can mutate skills at all, and
     `apply_skill_write(plan)` performs (or refuses) one proposal's mutation. The fourth
     seam is processed-session state: `iter_processed()`, `mark_processed()`, and
@@ -101,6 +102,16 @@ class HostAdapter(ABC):
                 return f.read()
         except OSError:
             return None
+
+    def iter_archived_skills(self) -> List[Dict[str, Any]]:
+        """Return this host's archived (retired) skills, in iter_skills()'s record shape.
+
+        Lets a caller tell "archived" from "unresolved" by asking the active host rather
+        than probing one host's paths. Concrete with an empty default: a host with no
+        archive has nothing to report, so its callers answer "unresolved", never
+        "archived".
+        """
+        return []
 
     def apply_skill_write(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """Apply (or refuse) one proposal's mutation on this host.
@@ -325,6 +336,12 @@ class HermesAdapter(HostAdapter):
     # read_skill_body() uses HostAdapter's concrete implementation: it calls
     # self.iter_skills() above, which calls skill_index.scan_skills() as an attribute,
     # so a test that monkeypatches skill_index.scan_skills is still observed.
+
+    def iter_archived_skills(self) -> List[Dict[str, Any]]:
+        # SKILLS_DIR is read here, at call time, and passed explicitly: scan_skills()'s
+        # default root was bound when skill_index was imported. scan_skills() reads both
+        # layouts the real .archive mixes (`<skill>/` and `<category>/<skill>/`).
+        return skill_index.scan_skills(os.path.join(skill_index.SKILLS_DIR, ".archive"))
 
 
 register_adapter("hermes", HermesAdapter())
@@ -580,6 +597,13 @@ class ClaudeCodeAdapter(HostAdapter):
         return results
 
     # read_skill_body() uses HostAdapter's concrete implementation.
+
+    def iter_archived_skills(self) -> List[Dict[str, Any]]:
+        # _archive_skill() moves retired skills to <skills>/.archive/<name>/; scan_skills()
+        # indexes that flat layout and a nested <group>/<skill>/ one alike.
+        return skill_index.scan_skills(
+            str(Path(_resolve_claude_code_home()) / "skills" / ".archive")
+        )
 
     # ── writes: direct in-place skill mutations ──────────────────────
 

@@ -16,6 +16,7 @@ check the first two are.
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
 
@@ -36,6 +37,22 @@ EXPECTED_SESSION_KEYS = {
 }
 
 EXPECTED_SKILL_KEYS = {"name", "category", "description", "path", "size"}
+
+
+def _skills_root(tmp_path):
+    """Every fixture builder roots its host's skill tree here, so the archive tests below
+    can add to (or remove) `<skills root>/.archive` without knowing which host they run on."""
+    return tmp_path / "skills"
+
+
+def _write_archived_skill(archive_dir, *parts):
+    """Write a minimal SKILL.md at archive_dir/<parts...>/SKILL.md, named after the last part."""
+    skill_dir = archive_dir.joinpath(*parts)
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    name = parts[-1]
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: retired\n---\n\n# {name}\n\nBody.\n"
+    )
 
 
 # ── Hermes fixture: SQLite state.db + ~/.hermes/skills/-shaped tree ─────
@@ -89,12 +106,20 @@ def _build_hermes_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch_sessions, "STATE_FILE", str(tmp_path / "skill_evolution_state.json"))
     monkeypatch.setenv(fetch_sessions.DB_PATH_ENV_VAR, db_path)
 
-    skills_root = tmp_path / "skills"
+    skills_root = _skills_root(tmp_path)
     _write_hermes_skill(skills_root, "general-skills", "money-admin-messaging")
     _write_hermes_skill(skills_root, ".archive", "money-admin-messaging")  # must be excluded
 
+    # iter_skills() calls scan_skills() with no arguments, and scan_skills's default root
+    # was bound at definition time, so the zero-arg call is redirected here. An explicit
+    # root (iter_archived_skills() passes `<SKILLS_DIR>/.archive`) is forwarded untouched,
+    # and SKILLS_DIR itself is redirected because that method reads it at call time.
     original_scan_skills = skill_index.scan_skills
-    monkeypatch.setattr(host.skill_index, "scan_skills", lambda: original_scan_skills(str(skills_root)))
+    monkeypatch.setattr(
+        host.skill_index, "scan_skills",
+        lambda skills_dir=str(skills_root), extra_roots=None: original_scan_skills(skills_dir, extra_roots),
+    )
+    monkeypatch.setattr(host.skill_index, "SKILLS_DIR", str(skills_root))
 
     return host.HermesAdapter()
 
@@ -147,7 +172,12 @@ def _build_claude_code_fixture(tmp_path, monkeypatch):
     ])
 
     _write_claude_code_skill(tmp_path, "money-admin-messaging")
-    _write_claude_code_skill(tmp_path, ".archive")  # must be excluded
+    # A real archived twin, where _archive_skill() puts one -- two levels down, so
+    # iter_skills()' flat walk never reaches it whatever its dot filter does.
+    _write_archived_skill(_skills_root(tmp_path) / ".archive", "money-admin-messaging")
+    # Which is why the skill-level dot filter needs its own case: a dot-prefixed skill
+    # directory holding a SKILL.md directly, which only that filter excludes.
+    _write_claude_code_skill(tmp_path, ".money-admin-messaging-draft", name="money-admin-messaging")
 
     return host.ClaudeCodeAdapter()
 
@@ -313,3 +343,67 @@ def test_state_file_returns_a_string(built_adapter):
         f"{host_name} adapter's _state_file() must return a non-empty string, "
         f"got {path!r}"
     )
+
+
+# ── Conformance assertions for archived skills (R10) ───────────────────
+# The diagnostic asks the active adapter whether a skill is archived rather than probing
+# one host's paths, so every adapter must answer from its own `<skills root>/.archive`.
+
+@pytest.mark.parametrize("built_adapter", ["hermes", "claude_code"], indirect=True)
+def test_archived_twin_is_reported_as_archived_and_not_as_live(built_adapter):
+    host_name, adapter = built_adapter
+
+    archived = adapter.iter_archived_skills()
+    live_paths = {s["path"] for s in adapter.iter_skills()}
+
+    assert [s["name"] for s in archived] == ["money-admin-messaging"], (
+        f"{host_name} adapter's iter_archived_skills() must report the archived twin, "
+        f"got {[s.get('name') for s in archived]}"
+    )
+    for skill in archived:
+        assert set(skill.keys()) == EXPECTED_SKILL_KEYS, (
+            f"{host_name} adapter's iter_archived_skills() dict has keys "
+            f"{sorted(skill.keys())}, expected {sorted(EXPECTED_SKILL_KEYS)}"
+        )
+        assert skill["path"] not in live_paths, (
+            f"{host_name} adapter reports {skill['path']} as both archived and live"
+        )
+
+
+@pytest.mark.parametrize("built_adapter", ["hermes", "claude_code"], indirect=True)
+def test_archived_skill_in_a_nested_group_is_reported(built_adapter, tmp_path):
+    host_name, adapter = built_adapter
+    _write_archived_skill(_skills_root(tmp_path) / ".archive", "retired-group", "old-helper")
+
+    names = {s["name"] for s in adapter.iter_archived_skills()}
+
+    assert "old-helper" in names, (
+        f"{host_name} adapter missed an archived skill under .archive/<group>/<skill>/, "
+        f"got {sorted(names)}"
+    )
+
+
+@pytest.mark.parametrize("built_adapter", ["hermes", "claude_code"], indirect=True)
+def test_no_archive_directory_reports_no_archived_skills(built_adapter, tmp_path):
+    host_name, adapter = built_adapter
+    shutil.rmtree(_skills_root(tmp_path) / ".archive")
+
+    assert adapter.iter_archived_skills() == [], (
+        f"{host_name} adapter must report no archived skills when .archive is absent"
+    )
+
+
+def test_adapter_without_an_archive_reports_no_archived_skills():
+    """A host that does not implement archiving inherits the empty default, so the
+    diagnostic says "unresolved" for it, never "archived"."""
+
+    class _NoArchiveAdapter(host.HostAdapter):
+        name = "no_archive"
+
+        def iter_sessions(self, since=None):
+            return []
+
+        def iter_skills(self, extra_roots=None):
+            return []
+
+    assert _NoArchiveAdapter().iter_archived_skills() == []
