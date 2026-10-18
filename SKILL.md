@@ -125,6 +125,15 @@ cat proposals/<id>.md                  # override with SKILL_EVOLUTION_PROPOSALS
 
 Each proposal is a markdown file with a structured YAML frontmatter. Read it, decide, change `status: approved` if you want.
 
+To see which pending proposals are worth reading first, run the read-only queue diagnostic:
+
+```bash
+python3 scripts/proposal_diagnostics.py                # state + reasons per pending proposal
+python3 scripts/proposal_diagnostics.py --format json  # same, machine-readable
+```
+
+It never changes a file. Each proposal gets one state — `unreadable`, `incomplete` (empty change, non-skill field, placeholder `create_new`), `ambiguous` (two installed files share the target name), `archived`, `unresolved` (neither installed nor archived — not the same as nonexistent), `stale` (its `old_value` no longer matches the installed skill), or `valid` — plus every other reason that applies, and possible-duplicate flags from plain text rules.
+
 ### 4. Auto-Apply (Opt-In)
 
 By default, proposals are **review-only**. Enable auto-apply:
@@ -240,6 +249,7 @@ This skill ships with ready-to-use scripts. On first load, the agent checks if t
 | `scripts/skill_index.py` | Scan installed skills (incluye `skills.external_dirs` / extra roots) → structured JSON index; `--extra-root` acepta 1+ roots adicionales |
 | `scripts/analyze.py` | Format NDJSON sessions for LLM consumption |
 | `scripts/proposal.py` | Proposal schema, I/O, and `apply_proposal()` logic |
+| `scripts/proposal_diagnostics.py` | Read-only diagnostic of the proposal queue: state, reasons and possible duplicates per pending proposal |
 | `scripts/evaluate.py` | Evaluation gate: deterministic + LLM-judge + regression + opt-in `human_review` evaluators, versioned history |
 | `scripts/host.py` | `HostAdapter` ABC + `HermesAdapter` + `ClaudeCodeAdapter`. Routes session/skill reads and proposal writes through the active host |
 | `scripts/optimize_skill.py` | Optional GEPA optimizer — runs a real `gepa.optimize_anything()` loop over a skill's own session history (needs the `gepa` extra) |
@@ -334,6 +344,7 @@ python3 scripts/fetch_sessions.py --prune-state    # prune processed-session sta
 python3 scripts/proposal.py --example              # print an example proposal
 python3 scripts/proposal.py --list                 # list current proposals
 python3 scripts/proposal.py --show <id>            # show one proposal
+python3 scripts/proposal_diagnostics.py            # read-only queue diagnostic (--all, --format json)
 
 # --- Evaluation gate ---
 python3 scripts/evaluate.py --list-evaluators      # show the resolved evaluator set
