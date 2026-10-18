@@ -137,12 +137,17 @@ def redact_pii(text: str) -> str:
     return _mask_cards(text)
 
 
+# No LIMIT: the cap applies *after* already-processed sessions are skipped (see
+# fetch_sessions()). A LIMIT here counted processed sessions against it, so a quiet day
+# returned nothing while older unprocessed sessions sat inside the window, and a busy day's
+# overflow was never analyzed. The window filter keeps the scan bounded; text started_at
+# values (ISO strings) pass it and are window-checked in Python, as before.
 SESSION_QUERY = """
     SELECT id, started_at, model, title, source
     FROM sessions
     WHERE source != 'cron'
+      AND (typeof(started_at) = 'text' OR started_at >= ?)
     ORDER BY started_at DESC
-    LIMIT ?
 """
 
 MESSAGE_QUERY = """
@@ -154,7 +159,8 @@ MESSAGE_QUERY = """
 
 MAX_MESSAGE_CHARS = 2000
 DEFAULT_LOOKBACK_HOURS = 48
-DEFAULT_MAX_SESSIONS = 20
+DEFAULT_MAX_SESSIONS = 200
+MAX_SESSIONS_ENV_VAR = "SKILL_EVOLUTION_MAX_SESSIONS"
 
 
 # ── Numeric env-var reading, shared by every tunable ────────────────────
@@ -201,6 +207,25 @@ def env_int(name: str, default: int) -> int:
     than truncating -- silently turning 1.5 into 1 is the worse surprise.
     """
     return _env_number(name, default, int)
+
+
+def resolve_max_sessions(explicit: Optional[int] = None) -> int:
+    """How many unprocessed sessions one run may return, on every host.
+
+    `--max-sessions` (explicit) > SKILL_EVOLUTION_MAX_SESSIONS > DEFAULT_MAX_SESSIONS (200),
+    read at call time. Below 1 warns and uses the default. Sessions past the cap are left
+    unmarked, so the next run picks them up. Every returned session lands in the analyzer
+    prompt, so lower this when the analyzer's context window is small.
+    """
+    if explicit is not None:
+        value, source = explicit, "--max-sessions"
+    else:
+        value, source = env_int(MAX_SESSIONS_ENV_VAR, DEFAULT_MAX_SESSIONS), MAX_SESSIONS_ENV_VAR
+    if value < 1:
+        print(f"warning: {source}={value} must be at least 1; using {DEFAULT_MAX_SESSIONS}",
+              file=sys.stderr)
+        return DEFAULT_MAX_SESSIONS
+    return value
 
 
 def get_state_file() -> str:
@@ -575,11 +600,14 @@ def _summarize_messages(messages) -> tuple:
 def fetch_sessions(
     db_path: str = DEFAULT_DB_PATH,
     lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
-    max_sessions: int = DEFAULT_MAX_SESSIONS,
+    max_sessions: Optional[int] = None,
     dry_run: bool = False,
     host: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Fetch recent unprocessed sessions from state.db.
+    """Fetch recent unprocessed sessions from state.db, newest first.
+
+    At most `max_sessions` (resolve_max_sessions(): flag > env var > 200) *unprocessed*
+    sessions are returned; the overflow stays unmarked for the next run.
 
     `host` identifies which processed-state namespace to read/write (KTD5) --
     defaults to `_resolve_host()`'s own env-var resolution when not given explicitly.
@@ -588,16 +616,20 @@ def fetch_sessions(
     have moved on since the adapter was resolved.
     """
     resolved_host = _resolve_host(host)
+    max_sessions = resolve_max_sessions(max_sessions)
     processed = set(load_processed(host=resolved_host))
     cutoff = datetime.now(timezone.utc).timestamp() - (lookback_hours * 3600)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    sessions = conn.execute(SESSION_QUERY, (max_sessions,)).fetchall()
     results = []
 
-    for session in sessions:
+    # Iterated lazily, so the scan stops once the cap is reached; messages are read only
+    # for the sessions kept.
+    for session in conn.execute(SESSION_QUERY, (cutoff,)):
+        if len(results) >= max_sessions:
+            break
         session_id = session["id"]
 
         if session_id in processed:
@@ -831,6 +863,7 @@ def fetch_sessions_for_host(
     host_name: str,
     lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
     dry_run: bool = False,
+    max_sessions: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch recent unprocessed sessions from a non-Hermes host adapter.
 
@@ -840,7 +873,8 @@ def fetch_sessions_for_host(
     every *other* adapter the identical guarantee: filter against `adapter.iter_processed()`,
     then (unless `dry_run`) `adapter.mark_processed()` and `adapter.prune_processed()`,
     mirroring `fetch_sessions()`'s own side-effect contract at the orchestration layer
-    instead of inside the adapter.
+    instead of inside the adapter. The same cap applies (resolve_max_sessions(), newest
+    first, after dedup) -- this path used to return every unprocessed session in the window.
 
     `host` is imported locally: this module is imported BY `host.py` (`HermesAdapter`
     delegates to `fetch_sessions()`), so a module-scope `import host` here would cycle.
@@ -851,10 +885,12 @@ def fetch_sessions_for_host(
     processed = set(adapter.iter_processed())
     since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
-    results = [
+    pending = [
         session for session in adapter.iter_sessions(since=since)
         if session["session_id"] not in processed
     ]
+    pending.sort(key=lambda s: s.get("started_at") or 0, reverse=True)
+    results = pending[:resolve_max_sessions(max_sessions)]
 
     if dry_run:
         return results
@@ -875,9 +911,10 @@ def main():
                         help="Hermes-only: state.db path. Ignored when SKILL_EVOLUTION_HOST "
                              "resolves to a non-hermes adapter.")
     parser.add_argument("--lookback-hours", type=int, default=DEFAULT_LOOKBACK_HOURS)
-    parser.add_argument("--max-sessions", type=int, default=DEFAULT_MAX_SESSIONS,
-                        help="Hermes-only: ignored when SKILL_EVOLUTION_HOST resolves to a "
-                             "non-hermes adapter.")
+    parser.add_argument("--max-sessions", type=int, default=None,
+                        help=f"Most unprocessed sessions to return, on any host (default: "
+                             f"${MAX_SESSIONS_ENV_VAR}, else {DEFAULT_MAX_SESSIONS}). The rest "
+                             f"stay unmarked for the next run.")
     parser.add_argument("--dry-run", action="store_true", help="Print counts without marking processed")
     parser.add_argument("--prune-state", action="store_true",
                         help="Prune the processed-session state file per "
@@ -914,6 +951,7 @@ def main():
             resolved_host,
             lookback_hours=args.lookback_hours,
             dry_run=args.dry_run,
+            max_sessions=args.max_sessions,
         )
 
     for session in sessions:
