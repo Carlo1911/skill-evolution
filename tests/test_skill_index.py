@@ -177,3 +177,78 @@ def test_scan_skills_no_extra_roots_identical_to_before(tmp_path):
     assert skill_index.scan_skills(str(tmp_path)) == skill_index.scan_skills(
         str(tmp_path), extra_roots=[]
     )
+
+
+def _write_flat_skill(root, name, description="does a thing"):
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nBody.\n"
+    )
+    return skill_dir
+
+
+def test_scan_skills_primary_root_indexes_flat_skills(tmp_path):
+    """`<root>/<skill>/SKILL.md` directly under the primary root is a live skill.
+
+    The primary walk used to treat every top-level dir as a category, so a flat skill's
+    own SKILL.md was never read and the analyzer was told it did not exist.
+    """
+    root = tmp_path / "skills"
+    _write_skill(root, "general-skills", "money-admin-messaging")
+    flat = _write_flat_skill(root, "deploy-helper")
+    (flat / "references").mkdir()
+    (flat / "references" / "notes.md").write_text("not a skill")
+
+    found = skill_index.scan_skills(str(root))
+
+    by_name = {s["name"]: s for s in found}
+    assert set(by_name) == {"money-admin-messaging", "deploy-helper"}
+    assert by_name["deploy-helper"]["category"] == "skills"
+    assert by_name["deploy-helper"]["path"] == str(flat / "SKILL.md")
+
+
+def test_scan_skills_dir_that_is_both_skill_and_category(tmp_path):
+    """A flat skill can also hold nested skills (e.g. `github/` + `github/github-issue-to-pr/`).
+    Both must be indexed -- in the primary root and in extra roots alike."""
+    for root in (tmp_path / "primary", tmp_path / "extra"):
+        _write_flat_skill(root, "github")
+        _write_skill(root, "github", "github-issue-to-pr")
+
+    primary = skill_index.scan_skills(str(tmp_path / "primary"))
+    assert {s["name"] for s in primary} == {"github", "github-issue-to-pr"}
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    extra = skill_index.scan_skills(str(empty), extra_roots=[str(tmp_path / "extra")])
+    assert {s["name"] for s in extra} == {"github", "github-issue-to-pr"}
+
+
+def test_scan_skills_symlinked_flat_twin_of_nested_skill_is_one_record(tmp_path):
+    """A flat entry symlinked to the same SKILL.md as a nested one is one skill, not an
+    ambiguous pair -- and the nested record (historical category) is the one kept."""
+    store = tmp_path / "store"
+    _write_flat_skill(store, "handoff")
+    root = tmp_path / "skills"
+    (root / "general-skills").mkdir(parents=True)
+    os.symlink(store / "handoff", root / "general-skills" / "handoff")
+    os.symlink(store / "handoff", root / "handoff")
+
+    found = skill_index.scan_skills(str(root))
+
+    assert len(found) == 1
+    assert found[0]["category"] == "general-skills"
+
+
+def test_scan_skills_distinct_flat_and_nested_same_name_stay_ambiguous(tmp_path):
+    """Two different files claiming one name are a real conflict: both are reported so
+    read_skill_body() returns None instead of silently picking one as the baseline."""
+    root = tmp_path / "skills"
+    _write_flat_skill(root, "github", description="flat copy")
+    _write_skill(root, "software-development", "github", description="nested copy")
+
+    found = skill_index.scan_skills(str(root))
+
+    assert sorted(s["description"] for s in found if s["name"] == "github") == [
+        "flat copy", "nested copy",
+    ]

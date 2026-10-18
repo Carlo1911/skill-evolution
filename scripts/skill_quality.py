@@ -153,12 +153,15 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
         target = f"skill:{skill_name}"
         evaluated_at = datetime.now(timezone.utc).isoformat()
         
-        # Combine into a single gate result
+        # Combine into a single gate result. Carry the provider-fault flag forward the way
+        # evaluate_and_record() does: without it an outage's 0.0 reads as a quality
+        # signal and find_low_scoring_targets() queues the skill for optimization.
         combined_result = evaluate.EvalResult(
             score=current_score,
             feedback=feedback,
             passed=passed,
             evaluator_name="gate",
+            transport_failure=any(getattr(r, "transport_failure", False) for r in results),
         )
         
         # Append to history

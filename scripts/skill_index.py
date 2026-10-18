@@ -67,10 +67,12 @@ def build_skill_record(skill_md: Path, category: str) -> Optional[dict]:
 def scan_skills(skills_dir: str = SKILLS_DIR, extra_roots: Optional[list] = None) -> list:
     """Scan skills directory and return structured index.
 
-    `extra_roots` optionally adds more roots to scan, each interpreted with the same
-    category-nested layout as the primary root: `<root>/<category>/<skill>/SKILL.md`,
-    or — for a flat external root like `~/.agents/skills/` — `<root>/<skill>/SKILL.md`
-    (the skill's category is then the root's basename). Duplicate skill names resolve
+    Every root (primary and extra) may hold either layout, decided per entry:
+    `<root>/<category>/<skill>/SKILL.md` (nested) or `<root>/<skill>/SKILL.md` (flat --
+    the skill's category is then the root's basename). An entry can be both at once
+    (`github/SKILL.md` alongside `github/github-issue-to-pr/SKILL.md`), so both are read.
+
+    `extra_roots` optionally adds more roots to scan. Duplicate skill names resolve
     to the FIRST root that reports them (the primary root wins), so pointing this at a
     root that overlaps the Hermes tree (e.g. a `skills.external_dirs` entry that is
     already symlinked under `~/.hermes/skills`) only ADDS the missing skills instead of
@@ -85,56 +87,41 @@ def scan_skills(skills_dir: str = SKILLS_DIR, extra_roots: Optional[list] = None
     # and quarantine. Indexing them would tell the analyzer a retired skill still
     # exists, and an archived twin of a live skill would make optimize_skill.py's
     # duplicate-name check reject the live one as ambiguous.
-    def _scan_nested(root: Path) -> list:
-        found = []
-        for category_dir in sorted(root.iterdir()):
-            if not category_dir.is_dir():
+    def _scan_root(root: Path) -> list:
+        walked = []  # (is_flat, record) in directory order
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
                 continue
-            if category_dir.name.startswith("."):
-                continue
-            for skill_dir in sorted(category_dir.iterdir()):
+            if (entry / "SKILL.md").exists():
+                record = build_skill_record(entry / "SKILL.md", root.name)
+                if record is not None:
+                    walked.append((True, record))
+            for skill_dir in sorted(entry.iterdir()):
                 if skill_dir.name.startswith("."):
                     continue
-                record = build_skill_record(skill_dir / "SKILL.md", category_dir.name)
+                record = build_skill_record(skill_dir / "SKILL.md", entry.name)
                 if record is not None:
-                    found.append(record)
-        return found
+                    walked.append((False, record))
 
-    results = []
-    seen_names = set()
+        # A flat entry is often a symlink to the same SKILL.md a category already holds.
+        # That is one skill, not an ambiguous pair, so the nested record (the historical
+        # one, with its real category) is kept. Distinct files sharing a name are a real
+        # conflict and both stay, so read_skill_body() reports ambiguity instead of
+        # silently picking one.
+        nested_files = {os.path.realpath(r["path"]) for is_flat, r in walked if not is_flat}
+        return [
+            r for is_flat, r in walked
+            if not (is_flat and os.path.realpath(r["path"]) in nested_files)
+        ]
 
-    # First root: exactly the historical behavior, byte for byte, so existing callers
-    # (and downstream de-duping by name) behave identically when extra_roots is absent.
-    results.extend(_scan_nested(base))
-
-    seen_names.update(r["name"] for r in results)
+    results = _scan_root(base)
+    seen_names = {r["name"] for r in results}
 
     for extra in extra_roots or []:
         extra_path = Path(os.path.expanduser(extra))
         if not extra_path.exists():
             continue
-
-        # A root may hold either layout (or both). Decide per-entry instead of per-root:
-        # `<root>/<skill>/SKILL.md` (flat) when a child directly carries SKILL.md,
-        # `<root>/<category>/<skill>/SKILL.md` (nested) when the child is a category.
-        found = []
-        for entry in sorted(extra_path.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            if (entry / "SKILL.md").exists():
-                # flat skill
-                record = build_skill_record(entry / "SKILL.md", extra_path.name)
-                if record is not None:
-                    found.append(record)
-            else:
-                # nested category
-                for skill_dir in sorted(entry.iterdir()):
-                    if skill_dir.name.startswith("."):
-                        continue
-                    record = build_skill_record(skill_dir / "SKILL.md", entry.name)
-                    if record is not None:
-                        found.append(record)
-        for record in found:
+        for record in _scan_root(extra_path):
             if record["name"] not in seen_names:
                 seen_names.add(record["name"])
                 results.append(record)

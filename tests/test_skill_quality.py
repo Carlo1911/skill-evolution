@@ -525,3 +525,51 @@ class TestCLI:
             skill_quality.main()
             
             mock_report.assert_called_once_with([], output_format="json")
+
+
+class TestTransportFailurePropagation:
+    """A provider outage during a quality pass must stay distinguishable from a bad skill.
+
+    The tracker builds its own combined gate entry instead of going through
+    evaluate_and_record(), so it has to carry `transport_failure` forward itself --
+    otherwise find_low_scoring_targets() reads the outage's 0.0 as a quality signal and
+    queues the skill for optimization.
+    """
+
+    def _run_with_judge(self, tmp_path, monkeypatch, judge_result):
+        from evaluate import EvalResult
+        history_path = tmp_path / "eval_history.jsonl"
+        monkeypatch.setenv("SKILL_EVOLUTION_HISTORY_PATH", str(history_path))
+        with patch("evaluate.installed_skill_body", return_value="# Skill\n\nBody."), \
+             patch("evaluate.evaluate_skill_text") as mock_eval:
+            mock_eval.return_value = [
+                judge_result,
+                EvalResult(score=1.0, feedback="", passed=True, evaluator_name="deterministic"),
+            ]
+            skill_quality.evaluate_skill_quality("flaky-skill")
+        return history_path
+
+    def test_provider_failure_is_recorded_and_not_a_candidate(self, tmp_path, monkeypatch):
+        import optimize_skill
+        from evaluate import EvalResult
+        history_path = self._run_with_judge(tmp_path, monkeypatch, EvalResult(
+            score=0.0, feedback="llm_judge failed closed: HTTP 429", passed=False,
+            evaluator_name="llm_judge", transport_failure=True,
+        ))
+
+        entries = [json.loads(line) for line in history_path.read_text().splitlines()]
+        assert len(entries) == 1
+        assert entries[0]["transport_failure"] is True
+        assert optimize_skill.find_low_scoring_targets(history_path=str(history_path)) == []
+
+    def test_genuine_low_score_still_becomes_a_candidate(self, tmp_path, monkeypatch):
+        import optimize_skill
+        from evaluate import EvalResult
+        history_path = self._run_with_judge(tmp_path, monkeypatch, EvalResult(
+            score=0.0, feedback="procedure is wrong", passed=False, evaluator_name="llm_judge",
+        ))
+
+        entries = [json.loads(line) for line in history_path.read_text().splitlines()]
+        assert "transport_failure" not in entries[0]
+        candidates = optimize_skill.find_low_scoring_targets(history_path=str(history_path))
+        assert [c["target"] for c in candidates] == ["skill:flaky-skill"]
