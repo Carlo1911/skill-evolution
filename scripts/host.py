@@ -359,6 +359,8 @@ register_adapter("hermes", HermesAdapter())
 # fallbacks, never raising on a malformed line) rather than assuming a fixed schema.
 
 CLAUDE_CODE_HOME_ENV_VAR = "SKILL_EVOLUTION_CLAUDE_CODE_HOME"
+# Claude Code's own override for where it keeps its config, sessions and skills.
+CLAUDE_CONFIG_DIR_ENV_VAR = "CLAUDE_CONFIG_DIR"
 
 # How much of a fallback-derived title (first user message, no custom-title record) to
 # keep after redaction -- mirrors fetch_sessions._summarize_messages()'s content_preview
@@ -367,15 +369,24 @@ TITLE_FALLBACK_MAX_CHARS = 100
 
 
 def _default_claude_code_home() -> str:
-    """`~/.claude`, resolved at call time (not baked into a module constant at import) so
-    a test's monkeypatched HOME env var is honoured on every call, the same way
-    fetch_sessions.get_state_file()/get_state_db_path() re-read their env var at call
-    time rather than freezing it at import."""
+    """Where Claude Code itself keeps its tree: CLAUDE_CONFIG_DIR when set, else `~/.claude`.
+
+    Claude Code moves its whole config dir (projects/, skills/) to CLAUDE_CONFIG_DIR, so a
+    profile set up that way was invisible here: on the machine this was found on, the
+    shell's CLAUDE_CONFIG_DIR named one profile while the adapter read another. Resolved
+    at call time (not baked into a module constant at import) so a test's monkeypatched
+    environment is honoured on every call, the same way fetch_sessions.get_state_file()
+    re-reads its env var. A blank value is ignored.
+    """
+    configured = os.environ.get(CLAUDE_CONFIG_DIR_ENV_VAR, "").strip()
+    if configured:
+        return os.path.expanduser(configured)
     return os.path.expanduser("~/.claude")
 
 
 def _resolve_claude_code_home() -> str:
-    """Resolve the Claude Code home directory: SKILL_EVOLUTION_CLAUDE_CODE_HOME > `~/.claude`.
+    """Resolve the Claude Code home directory:
+    SKILL_EVOLUTION_CLAUDE_CODE_HOME > CLAUDE_CONFIG_DIR > `~/.claude`.
 
     Same call-time-env-read shape as fetch_sessions.get_state_file(): read at call time,
     blank ignored, so a test or an isolated run can redirect this adapter's root without
