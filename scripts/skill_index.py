@@ -44,16 +44,23 @@ def rewrite_frontmatter_description(content: str, new_value: str) -> Optional[st
     """Replace the single-line `description:` frontmatter value, or None if impossible.
 
     Single-line values only -- matches parse_name_description_frontmatter()'s
-    understanding of the hand-rolled format (no PyYAML). Returns None when the new value
-    contains a newline or there is no `description:` line, so the caller fails closed
-    instead of corrupting the file. Shared by the Claude Code adapter's write and the
-    gate's composed candidate (evaluate.compose_body_changes), so both mean the same file.
+    understanding of the hand-rolled format (no PyYAML). Only lines between the opening
+    `---` and the next `---` count: scanning the whole file rewrote a `description:` line
+    in the body of a skill whose frontmatter had none. Returns None when the new value
+    contains a newline, there is no frontmatter, or it has no `description:` line, so the
+    caller fails closed instead of corrupting the file. Shared by the Claude Code adapter's
+    write and the gate's composed candidate (evaluate.compose_body_changes), so both mean
+    the same file.
     """
     if "\n" in new_value:
         return None
     lines = content.split("\n")
-    for i, line in enumerate(lines):
-        if line.startswith("description:"):
+    if not lines or lines[0].strip() != "---":
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return None  # end of frontmatter, no description line in it
+        if lines[i].startswith("description:"):
             lines[i] = f"description: {new_value}"
             return "\n".join(lines)
     return None

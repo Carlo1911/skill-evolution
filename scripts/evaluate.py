@@ -1251,6 +1251,37 @@ class LLMJudgeEvaluator(Evaluator):
         avg_score = sum(float(parsed[k]) for k in self.RUBRIC_KEYS) / len(self.RUBRIC_KEYS)
         return avg_score, parsed
 
+    @classmethod
+    def _find_rubric_object(cls, raw: str) -> Dict[str, Any]:
+        """The judge's JSON object: the whole response, else the last embedded object that
+        carries every rubric key.
+
+        A greedy `\\{.*\\}` used to span from the first brace to the last, so a reasoning
+        model that mentioned `{frontmatter}` before its answer failed closed with
+        "malformed JSON". Each `{` is now tried with raw_decode, and the last object with
+        the rubric keys wins -- the answer comes after the reasoning. Validation of the
+        values is unchanged and still fails closed.
+        """
+        try:
+            whole = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            whole = None
+        if isinstance(whole, dict):
+            return whole
+        decoder = json.JSONDecoder()
+        found = None
+        for start in (i for i, ch in enumerate(raw) if ch == "{"):
+            try:
+                candidate, _ = decoder.raw_decode(raw, start)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and all(k in candidate for k in cls.RUBRIC_KEYS):
+                found = candidate
+        if found is None:
+            raise ValueError(f"no JSON object with the rubric keys found in judge response: "
+                             f"{raw[:200]!r}")
+        return found
+
     def _build_prompt(self, content: str) -> str:
         boundary = secrets.token_hex(16)
         return (
@@ -1266,16 +1297,7 @@ class LLMJudgeEvaluator(Evaluator):
         )
 
     def _parse_response(self, raw: str) -> Dict[str, Any]:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            raise ValueError(f"no JSON object found in judge response: {raw[:200]!r}")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"malformed JSON in judge response: {e}") from e
-
-        if not isinstance(parsed, dict):
-            raise ValueError("judge response JSON is not an object")
+        parsed = self._find_rubric_object(raw)
 
         for key in self.RUBRIC_KEYS:
             if key not in parsed:
