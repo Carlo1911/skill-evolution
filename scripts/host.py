@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from abc import ABC, abstractmethod
@@ -455,6 +456,17 @@ def _fail_write(reason: str) -> Dict[str, Any]:
     return {"can_apply": False, "reason": reason}
 
 
+def _target_mode(path: Path) -> int:
+    """Permission bits `path` should end up with: its current ones when it exists,
+    otherwise the default a plain open() would apply under the process umask."""
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write `content` to `path` atomically: mkstemp in the same directory + os.replace.
 
@@ -470,6 +482,10 @@ def _atomic_write_text(path: Path, content: str) -> None:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
+        # mkstemp() creates the temp file 0600 and os.replace() keeps that mode, which
+        # silently turned a 0644 eval_history.jsonl into 0600 and made every new SKILL.md
+        # 0600. Keep the replaced file's mode; give a new file what open() would.
+        os.chmod(tmp_path, _target_mode(path))
         os.replace(tmp_path, path)
     except BaseException:
         try:
