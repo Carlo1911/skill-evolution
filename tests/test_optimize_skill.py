@@ -825,7 +825,7 @@ def test_list_candidates_prints_targets_and_writes_no_proposal(monkeypatch, caps
     fake_targets = [
         {"target": "skill:weak-skill", "score": 0.3, "feedback": "Too verbose and unclear."},
     ]
-    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda target_namespace="skill": fake_targets)
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda target_namespace="skill", **_: fake_targets)
 
     save_called = []
     monkeypatch.setattr(
@@ -846,7 +846,7 @@ def test_list_candidates_prints_targets_and_writes_no_proposal(monkeypatch, caps
 def test_list_candidates_with_no_targets_prints_clear_message(monkeypatch, capsys):
     monkeypatch.setenv(optimize_skill.OPTIMIZER_ENABLED_ENV_VAR, "true")
     monkeypatch.setattr(sys, "argv", ["optimize_skill.py", "--list-candidates"])
-    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda target_namespace="skill": [])
+    monkeypatch.setattr(optimize_skill, "find_low_scoring_targets", lambda target_namespace="skill", **_: [])
 
     optimize_skill.main()
 

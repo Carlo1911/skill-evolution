@@ -257,10 +257,14 @@ def test_append_history_writes_flag_only_when_set(tmp_path):
 def test_find_low_scoring_targets_skips_transport_flagged(monkeypatch, tmp_path):
     import optimize_skill
 
+    from host_sandbox import build_host
+    box = build_host("claude_code", tmp_path, monkeypatch)
+    for name in ("good", "outage"):
+        box.write_skill(name, f"---\nname: {name}\ndescription: d\n---\n")
     path = tmp_path / "hist.jsonl"
     lines = [
-        {"target": "skill:good", "timestamp": "2026-07-01T00:00:00+00:00", "score": 0.5, "passed": False, "feedback": "genuine regression", "evaluator_name": "gate"},
-        {"target": "skill:outage", "timestamp": "2026-07-02T00:00:00+00:00", "score": 0.0, "passed": False, "feedback": "503", "evaluator_name": "gate", "transport_failure": True},
+        {"target": "skill:good", "timestamp": "2026-07-01T00:00:00+00:00", "score": 0.5, "passed": False, "feedback": "genuine regression", "evaluator_name": "gate", "subject": "installed"},
+        {"target": "skill:outage", "timestamp": "2026-07-02T00:00:00+00:00", "score": 0.0, "passed": False, "feedback": "503", "evaluator_name": "gate", "transport_failure": True, "subject": "installed"},
     ]
     path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
     monkeypatch.setattr(evaluate, "get_history_path", lambda: str(path))

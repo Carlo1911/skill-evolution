@@ -9,6 +9,7 @@ Usage:
     python3 scripts/evaluate.py --list-evaluators
 """
 
+import hashlib
 import json
 import math
 import os
@@ -194,10 +195,46 @@ def get_history_archive_path(history_path: Optional[str] = None) -> str:
     return os.environ.get(HISTORY_ARCHIVE_PATH_ENV_VAR, default)
 
 
+# What a `skill_text` history entry scored: the installed SKILL.md as it is (skill_quality.py)
+# or the text a proposal would produce (the gate). Both write `skill:<name>` with kind
+# `skill_text`, and only the first says anything about the installed skill's quality.
+SUBJECT_INSTALLED = "installed"
+SUBJECT_CANDIDATE = "candidate"
+
+
+def content_digest(text: str) -> str:
+    """Short sha256 of `text` (utf-8), recorded so a reader can tell whether the skill an
+    entry scored is still the one installed."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def entry_subject(entry: Dict[str, Any]) -> Optional[str]:
+    """`installed`/`candidate` for a skill_text entry, else None.
+
+    Entries written before the `subject` field are inferred: skill_quality.py records no
+    session ids and the same content and baseline size (it scores the installed body
+    against itself), which no gate entry does. On the 2026-10-18 history this splits the
+    426 skill_text entries into the 401 skill_quality outages and the 25 proposal
+    evaluations, matching how each was written.
+    """
+    if entry.get("subject"):
+        return entry["subject"]
+    kind = entry.get("kind")
+    # Entries older than `kind` itself carry neither field; under a skill: key they were
+    # skill text too.
+    if kind != "skill_text" and not (kind is None and entry.get("target", "").startswith("skill:")):
+        return None
+    size = entry.get("content_size")
+    if not entry.get("session_ids") and size is not None and size == entry.get("baseline_size"):
+        return SUBJECT_INSTALLED
+    return SUBJECT_CANDIDATE
+
+
 def append_history(target: str, result: EvalResult, session_ids: Optional[List[str]] = None,
                     path: Optional[str] = None, content_size: Optional[int] = None,
                     baseline_size: Optional[int] = None, transport_failure: bool = False,
-                    kind: Optional[str] = None) -> None:
+                    kind: Optional[str] = None, subject: Optional[str] = None,
+                    content_sha256: Optional[str] = None) -> None:
     """Append one JSON line for `target`'s evaluation result to the history file.
 
     `content_size`/`baseline_size` (utf-8 bytes) are what make cumulative drift
@@ -214,6 +251,9 @@ def append_history(target: str, result: EvalResult, session_ids: Optional[List[s
     `tool_calls`, `analyzer_prompt`). Written only when set so pre-kind entries stay
     untyped. migrate_proposal_history() uses it to leave proposal-document lineage under
     `proposal:<id>` instead of folding it into the skill's lineage.
+
+    `subject` (SUBJECT_INSTALLED/SUBJECT_CANDIDATE) and `content_sha256` (content_digest()
+    of the scored text) are written only when set, for skill text: see entry_subject().
     """
     history_path = path or get_history_path()
     # A bare file name has no directory part, and os.makedirs("") raises.
@@ -232,6 +272,10 @@ def append_history(target: str, result: EvalResult, session_ids: Optional[List[s
         entry["baseline_size"] = baseline_size
     if kind is not None:
         entry["kind"] = kind
+    if subject is not None:
+        entry["subject"] = subject
+    if content_sha256 is not None:
+        entry["content_sha256"] = content_sha256
     if transport_failure or getattr(result, "transport_failure", False):
         entry["transport_failure"] = True
     else:
@@ -2333,7 +2377,9 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
     def _record_target(label: str, target: str, results: List[EvalResult], *,
                        content_size: Optional[int] = None,
                        baseline_size: Optional[int] = None,
-                       kind: Optional[str] = None) -> None:
+                       kind: Optional[str] = None,
+                       subject: Optional[str] = None,
+                       content_sha256: Optional[str] = None) -> None:
         """Combine one target's evaluator results, append its gate entry, and fold the
         outcome into the overall decision. `label` is the feedback/decision prefix;
         `kind` is the history lineage tag (written only when set). `content_size`/
@@ -2360,7 +2406,8 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         )
         append_history(target, combined, session_ids=resolved_session_ids, kind=kind or label,
                        content_size=content_size, baseline_size=baseline_size,
-                       transport_failure=transport_failure)
+                       transport_failure=transport_failure, subject=subject,
+                       content_sha256=content_sha256)
         all_results.extend(results)
 
     if "skill" in resolved_targets:
@@ -2379,7 +2426,8 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         candidate = _build_candidate(proposal)
         if (candidate.kind == MALFORMED_CONTENT_KIND or candidate.error is not None
                 or _ambiguous_target_result(proposal) is not None):
-            _record_target("skill", target, skill_results, kind="skill_text")
+            _record_target("skill", target, skill_results, kind="skill_text",
+                           subject=SUBJECT_CANDIDATE)
         else:
             _record_target(
                 "skill", target, skill_results,
@@ -2387,6 +2435,8 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
                 baseline_size=(len(candidate.baseline.encode("utf-8"))
                                if candidate.baseline else None),
                 kind="skill_text",
+                subject=SUBJECT_CANDIDATE,
+                content_sha256=content_digest(candidate.content),
             )
 
     if "proposal" in resolved_targets:

@@ -175,6 +175,8 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
             content_size=len(skill_body.encode("utf-8")),
             baseline_size=len(skill_body.encode("utf-8")),  # Same as content for quality checks
             kind="skill_text",
+            subject=evaluate.SUBJECT_INSTALLED,
+            content_sha256=evaluate.content_digest(skill_body),
         )
         
         delta = (current_score - previous_score) if previous_score is not None else None

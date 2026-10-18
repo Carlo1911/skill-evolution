@@ -87,7 +87,8 @@ def is_enabled() -> bool:
 
 def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
                               history_path: Optional[str] = None,
-                              target_namespace: Optional[str] = "skill") -> List[Dict[str, Any]]:
+                              target_namespace: Optional[str] = "skill",
+                              skipped: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
     """Return each target's most recent history entry when it scores below `threshold`.
 
     `target_namespace` filters to targets with the given prefix:
@@ -98,27 +99,65 @@ def find_low_scoring_targets(threshold: float = DEFAULT_LOW_SCORE_THRESHOLD,
     Entries tagged `transport_failure: true` are skipped: a score=0.0 caused by a provider
     rate limit or outage is not a quality signal, and must not surface this target as
     needing optimization.
+
+    A `skill:` target is judged only by entries that scored the **installed** skill
+    (evaluate.entry_subject()). The gate records under the same key what a proposal would
+    produce, and on 2026-10-18 all 15 candidates listed came from such entries: 9 failed
+    proposal structure checks, 5 an oversized proposed body. Those say the proposal was
+    bad, not the skill. Of the installed entries that score low, a skill that no longer
+    resolves (archived, ambiguous, gone) or whose installed text no longer matches the
+    entry's `content_sha256` is dropped as well: the score describes text that is not
+    there any more.
+
+    `skipped`, when given, is filled with how many targets each rule dropped
+    (`candidate_only`, `not_installed`, `changed_since`), so an empty list can be told apart
+    from a broken one.
     """
     import evaluate
 
+    counts = {"candidate_only": 0, "not_installed": 0, "changed_since": 0}
     entries = evaluate._read_all_entries(history_path or evaluate.get_history_path())
     latest_by_target: Dict[str, Dict[str, Any]] = {}
+    candidate_targets = set()
     for entry in entries:
         if entry.get("transport_failure"):
             continue
-        latest_by_target[entry.get("target", "")] = entry  # entries are chronological; last wins
+        target = entry.get("target", "")
+        if target.startswith("skill:") and evaluate.entry_subject(entry) != evaluate.SUBJECT_INSTALLED:
+            candidate_targets.add(target)
+            continue
+        latest_by_target[target] = entry  # entries are chronological; last wins
+    counts["candidate_only"] = len(candidate_targets - set(latest_by_target))
 
     def matches_namespace(target: str) -> bool:
         if target_namespace is None or target_namespace == "all":
             return True
         return target.startswith(target_namespace + ":") if target_namespace else False
 
-    return [
+    def still_describes_installed(entry: Dict[str, Any]) -> bool:
+        target = entry.get("target", "")
+        if not target.startswith("skill:"):
+            return True
+        body = _installed_body(target[len("skill:"):])
+        if body is None:
+            counts["not_installed"] += 1
+            return False
+        digest = entry.get("content_sha256")
+        if digest and digest != evaluate.content_digest(body):
+            counts["changed_since"] += 1
+            return False
+        return True
+
+    found = [
         entry for entry in latest_by_target.values()
         if matches_namespace(entry.get("target", ""))
         and entry.get("score", 1.0) < threshold
         and entry.get("feedback")
+        and still_describes_installed(entry)
     ]
+    if skipped is not None:
+        skipped.update(counts)
+    return found
 
 
 def _format_session_excerpts(sessions: List[Dict[str, Any]]) -> str:
@@ -776,7 +815,13 @@ def main():
     args = parser.parse_args()
 
     if args.list_candidates:
-        _print_candidates(find_low_scoring_targets(target_namespace=args.target))
+        skipped: Dict[str, int] = {}
+        _print_candidates(find_low_scoring_targets(target_namespace=args.target, skipped=skipped))
+        if any(skipped.values()):
+            print("skipped skill targets: "
+                  f"{skipped['candidate_only']} scored only as a proposal's candidate, "
+                  f"{skipped['not_installed']} no longer installed, "
+                  f"{skipped['changed_since']} changed since scored", file=sys.stderr)
         return
 
     if args.skill:

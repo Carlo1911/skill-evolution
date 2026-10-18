@@ -571,5 +571,7 @@ class TestTransportFailurePropagation:
 
         entries = [json.loads(line) for line in history_path.read_text().splitlines()]
         assert "transport_failure" not in entries[0]
-        candidates = optimize_skill.find_low_scoring_targets(history_path=str(history_path))
+        assert entries[0]["subject"] == "installed"
+        with patch("optimize_skill._installed_body", return_value="# Skill\n\nBody."):
+            candidates = optimize_skill.find_low_scoring_targets(history_path=str(history_path))
         assert [c["target"] for c in candidates] == ["skill:flaky-skill"]

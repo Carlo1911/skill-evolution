@@ -153,13 +153,18 @@ def test_second_apply_marks_nothing(tmp_path):
     assert history.read_bytes() == after_first
 
 
-def test_marked_targets_fall_back_to_their_last_unmarked_entry(tmp_path):
+def test_marked_targets_fall_back_to_their_last_unmarked_entry(tmp_path, monkeypatch):
     """The point of the backfill: the optimizer stops reading outages as quality."""
+    from host_sandbox import build_host
+    box = build_host("claude_code", tmp_path, monkeypatch)
+    for name in ("outage-only", "had-real-score"):
+        box.write_skill(name, f"---\nname: {name}\ndescription: d\n---\n")
     history = tmp_path / "eval_history.jsonl"
+    installed = {"subject": "installed"}
     _write(history, [
-        _gate("skill:outage-only", HTTP_401),
-        _gate("skill:had-real-score", "judge said fine", passed=True, score=0.9),
-        _gate("skill:had-real-score", CHAIN_401),
+        _gate("skill:outage-only", HTTP_401, **installed),
+        _gate("skill:had-real-score", "judge said fine", passed=True, score=0.9, **installed),
+        _gate("skill:had-real-score", CHAIN_401, **installed),
     ])
     before = {e["target"] for e in optimize_skill.find_low_scoring_targets(history_path=str(history))}
     assert before == {"skill:outage-only", "skill:had-real-score"}
