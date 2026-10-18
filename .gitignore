@@ -17,3 +17,8 @@ eval_history.jsonl
 # backfill's --apply backup stay local-only like the history itself.
 eval_history.archive.jsonl
 eval_history.jsonl.bak-*
+# Manual pipeline runs at the repo root: fetch_sessions.py output (redacted, but real
+# session transcripts), the analyze.py prompt built from it, and the skill index.
+/sessions.ndjson
+/analysis_output.md
+/skill_index.json
