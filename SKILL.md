@@ -132,7 +132,7 @@ python3 scripts/proposal_diagnostics.py                # state + reasons per pen
 python3 scripts/proposal_diagnostics.py --format json  # same, machine-readable
 ```
 
-It never changes a file. Each proposal gets one state — `unreadable`, `incomplete` (empty change, non-skill field, placeholder `create_new`), `ambiguous` (two installed files share the target name), `archived`, `unresolved` (neither installed nor archived — not the same as nonexistent), `stale` (its `old_value` no longer matches the installed skill), or `valid` — plus every other reason that applies, and possible-duplicate flags from plain text rules.
+It never changes a file. Each proposal gets one state — `unreadable`, `duplicate_id` (several files claim one proposal id), `incomplete` (empty change, non-skill field, placeholder `create_new`), `ambiguous` (two installed files share the target name), `archived`, `unresolved` (neither installed nor archived — not the same as nonexistent), `stale` (its `old_value` no longer matches the installed skill), or `valid` — plus every other reason that applies, and possible-duplicate flags from plain text rules.
 
 ### 4. Auto-Apply (Opt-In)
 
