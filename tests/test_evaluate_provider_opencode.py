@@ -156,13 +156,31 @@ def test_zen_defaults_to_zen_endpoint_and_big_pickle(monkeypatch, captured_post)
 
 
 def test_go_defaults_to_go_endpoint_without_big_pickle(monkeypatch, captured_post):
-    """The Go catalogue has no big-pickle; the default must be a Go model id."""
+    """The Go catalogue has no big-pickle; the default must be a Go model id (checked 2026-10-18)."""
     monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
 
     assert evaluate._call_opencode_go("hello") == "stubbed reply"
     assert captured_post["url"] == "https://opencode.ai/zen/go/v1/chat/completions"
-    assert captured_post["body"]["model"] == "deepseek-v4-flash"
+    assert captured_post["body"]["model"] == "deepseek-v4.1-flash"
     assert captured_post["provider_label"] == "OpenCode Go"
+
+
+def test_go_sends_a_stable_session_header(monkeypatch, captured_post):
+    """Go refuses requests without x-opencode-session (HTTP 400 MissingSessionID)."""
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+
+    evaluate._call_opencode_go("hello")
+    first = captured_post["headers"]["x-opencode-session"]
+    evaluate._call_opencode_go("again")
+
+    assert first and captured_post["headers"]["x-opencode-session"] == first
+    assert captured_post["headers"]["authorization"] == "Bearer test-key"
+
+
+def test_zen_sends_no_session_header(monkeypatch, captured_post):
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+    evaluate._call_opencode_zen("hello")
+    assert "x-opencode-session" not in captured_post["headers"]
 
 
 def test_zen_tier_env_vars_win_over_legacy_generic(monkeypatch, captured_post):

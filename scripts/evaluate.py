@@ -882,15 +882,22 @@ DEFAULT_OPENCODE_MODEL = "big-pickle"
 DEFAULT_OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_OPENCODE_ZEN_MODEL = "big-pickle"
 DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
-DEFAULT_OPENCODE_GO_MODEL = "deepseek-v4-flash"
+# deepseek-v4-flash left the Go catalogue; checked 2026-10-18 against /zen/go/v1/models.
+DEFAULT_OPENCODE_GO_MODEL = "deepseek-v4.1-flash"
+# Go routes by session: a request without `x-opencode-session` is refused with HTTP 400
+# MissingSessionID (verified 2026-10-18). Its docs ask clients for a stable id per
+# conversation; each judge call is a conversation of its own, and one id per process keeps
+# a run's calls together for routing and prompt caching.
+OPENCODE_SESSION_HEADER = "x-opencode-session"
+_OPENCODE_SESSION_ID = secrets.token_hex(16)
 
 
 def _call_opencode_tier(prompt: str, base_url: str, model: str, label: str,
-                        timeout: int = 60) -> str:
+                        timeout: int = 60, extra_headers: Optional[Dict[str, str]] = None) -> str:
     """Shared OpenCode caller for the Zen/Go tiers (both OpenAI-compatible).
 
-    Auth is always the same ``OPENCODE_API_KEY`` bearer token; only the endpoint
-    catalogue and default model differ per tier.
+    Auth is always the same ``OPENCODE_API_KEY`` bearer token; the endpoint catalogue,
+    default model and any tier-specific header (`extra_headers`) differ per tier.
     """
     api_key = os.environ.get(OPENCODE_API_KEY_ENV_VAR, "")
     if not api_key:
@@ -899,7 +906,8 @@ def _call_opencode_tier(prompt: str, base_url: str, model: str, label: str,
             f"Export it (do not commit it) before running evaluators against OpenCode."
         )
     return _call_openai_compatible(
-        prompt, base_url, model, {"authorization": f"Bearer {api_key}"}, label, timeout,
+        prompt, base_url, model, {"authorization": f"Bearer {api_key}", **(extra_headers or {})},
+        label, timeout,
     )
 
 
@@ -923,14 +931,15 @@ def _call_opencode_go(prompt: str, timeout: int = 60) -> str:
     """Call OpenCode Go subscription tier (``https://opencode.ai/zen/go/v1``).
 
     Catalogue (``/zen/go/v1/models``) is a different, smaller list WITHOUT ``big-pickle``
-    (e.g. ``deepseek-v4-flash`` -- note: no ``-free`` suffix, unlike Zen). Configured via
+    (e.g. ``deepseek-v4.1-flash`` -- note: no ``-free`` suffix, unlike Zen). Configured via
     ``SKILL_EVOLUTION_OPENCODE_GO_BASE_URL``/``SKILL_EVOLUTION_OPENCODE_GO_MODEL``; the
     legacy generic ``SKILL_EVOLUTION_OPENCODE_*`` vars are deliberately NOT read here so a
     Zen-pointed generic override can never silently redirect the Go tier.
     """
     base_url = os.environ.get(OPENCODE_GO_BASE_URL_ENV_VAR, DEFAULT_OPENCODE_GO_BASE_URL)
     model = provider_model("opencode_go")
-    return _call_opencode_tier(prompt, base_url, model, "OpenCode Go", timeout)
+    return _call_opencode_tier(prompt, base_url, model, "OpenCode Go", timeout,
+                               extra_headers={OPENCODE_SESSION_HEADER: _OPENCODE_SESSION_ID})
 
 
 def _call_opencode(prompt: str, timeout: int = 60) -> str:
