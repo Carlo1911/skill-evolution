@@ -36,6 +36,12 @@ class ProposalStatus(str, Enum):
     APPLIED = "applied"
 
 
+# Statuses still awaiting an outcome. A human approves by setting `status: approved` (the
+# flow README and SKILL.md document), so apply_proposal() must accept it -- it used to
+# accept only `proposed`, which made that documented flow raise on every host.
+PENDING_STATUSES = (ProposalStatus.PROPOSED, ProposalStatus.APPROVED)
+
+
 def get_proposals_dir() -> str:
     """Return the proposals directory, defaulting to ./proposals/ at the repo root.
 
@@ -449,7 +455,8 @@ def _build_write_plan(proposal: SkillEvolutionProposal):
 
     Returns (plan, None) on success or (None, error_reason) when the proposal cannot be
     expressed as a mutation at all (currently only a create_new with a missing/
-    placeholder body or name) -- callers refuse before the evaluation gate, so a
+    placeholder body or name, or an improve_existing whose body/description changes are
+    structurally unusable) -- callers refuse before the evaluation gate, so a
     structurally invalid proposal never costs a provider call.
     """
     plan = {
@@ -466,6 +473,13 @@ def _build_write_plan(proposal: SkillEvolutionProposal):
             for c in proposal.proposed_changes
         ],
     }
+    if proposal.type == ProposalType.IMPROVE_EXISTING:
+        # The gate fails these too, but refusing here keeps an unapplicable proposal from
+        # costing a provider call -- and the Hermes adapter would otherwise emit a `patch`
+        # with nothing to patch for an empty new_value.
+        problem = evaluate._structural_problem(proposal)
+        if problem:
+            return None, problem
     if proposal.type == ProposalType.CREATE_NEW:
         meta, error = _resolve_create_meta(proposal)
         if error:
@@ -495,8 +509,9 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
             instructions: list of dicts for the agent (Hermes) or writes (Claude Code)
             evaluation_results: list of evaluator result dicts (present once the gate has run)
     """
-    if proposal.status != ProposalStatus.PROPOSED:
-        raise ValueError(f"Cannot apply: proposal status is {proposal.status.value}, not 'proposed'")
+    if proposal.status not in PENDING_STATUSES:
+        raise ValueError(f"Cannot apply: proposal status is {proposal.status.value}; only "
+                         f"'proposed' or 'approved' proposals can be applied")
 
     if proposal.confidence < min_confidence:
         raise ValueError(f"Confidence {proposal.confidence:.2f} below threshold {min_confidence:.2f}")

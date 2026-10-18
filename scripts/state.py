@@ -6,6 +6,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -160,7 +161,10 @@ def mark_processed(session_ids, host=None, path=None):
         }
 
     target = path or get_state_file()
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    # A bare file name (SKILL_EVOLUTION_STATE_FILE=state.json) has no directory part, and
+    # os.makedirs("") raises -- it resolves against the cwd, which already exists.
+    if os.path.dirname(target):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "w") as f:
         json.dump(state, f, indent=2)
 
@@ -175,11 +179,23 @@ def _parse_state_retention(raw):
     if raw is None or not raw.strip():
         return None
     value = raw.strip()
-    if value.endswith("mo"):
-        return ("age_days", float(value[:-2]) * 30)
-    if value.endswith("d"):
-        return ("age_days", float(value[:-1]))
-    return ("count", int(value))
+    try:
+        if value.endswith("mo"):
+            rule = ("age_days", float(value[:-2]) * 30)
+        elif value.endswith("d"):
+            rule = ("age_days", float(value[:-1]))
+        else:
+            rule = ("count", int(value))
+    except ValueError:
+        rule = None
+    # A typo must not take the run down: this is read after mark_processed() on the fetch
+    # path, so raising there marked sessions processed and then exited before emitting
+    # them -- they were never analyzed. Warn and keep everything, like _env_number().
+    if rule is None or not math.isfinite(rule[1]):
+        print(f"warning: {STATE_RETENTION_ENV_VAR}={raw!r} is not a valid retention (N, Nd or Nmo); "
+              f"treating it as unbounded", file=sys.stderr)
+        return None
+    return rule
 
 
 def prune_processed(retention=None, keep_ids=None, host=None, path=None):
@@ -293,6 +309,9 @@ def prune_processed(retention=None, keep_ids=None, host=None, path=None):
         **{k: v for k, v, b in survivors},
     }
     target = path or get_state_file()
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    # A bare file name (SKILL_EVOLUTION_STATE_FILE=state.json) has no directory part, and
+    # os.makedirs("") raises -- it resolves against the cwd, which already exists.
+    if os.path.dirname(target):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "w") as f:
         json.dump(new_state, f, indent=2)

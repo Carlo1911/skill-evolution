@@ -30,7 +30,8 @@ Everything else is optional and only needs to be set to change a default:
 | `SKILL_EVOLUTION_EVALUATORS` | `deterministic,llm_judge,regression` | Which evaluators the gate runs |
 | `SKILL_EVOLUTION_GATE_STRICTNESS` | `strict` | `strict` (all must pass) or `majority` |
 | `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude` / `ollama` / `lmstudio` / `opencode` / `openai` / `gemini`; comma-separated for a fallback chain (e.g. `claude,opencode,ollama`) |
-| `SKILL_EVOLUTION_CLAUDE_CODE_HOME` | `~/.claude` | Only read when `SKILL_EVOLUTION_HOST=claude_code` |
+| `SKILL_EVOLUTION_CLAUDE_CODE_HOME` | `$CLAUDE_CONFIG_DIR`, else `~/.claude` | Only read when `SKILL_EVOLUTION_HOST=claude_code` |
+| `SKILL_EVOLUTION_MAX_SESSIONS` | `200` | Most unprocessed sessions one fetch run returns (any host); `--max-sessions` overrides it |
 | `SKILL_EVOLUTION_HISTORY_PATH` | `./eval_history.jsonl` | Evaluation history file |
 
 See `CLAUDE.md` and `SKILL.md` for the full list — this table is the minimum you need to

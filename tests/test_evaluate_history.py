@@ -1,5 +1,6 @@
 """Tests for scripts/evaluate.py's versioned evaluation history store (U2)."""
 
+import json
 import os
 import sys
 
@@ -7,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import pytest
 
+import evaluate
 from evaluate import (
     EvalResult, RegressionEvaluator, append_history, get_history_archive_path,
     migrate_proposal_history, prune_history, read_history,
@@ -290,3 +292,38 @@ def test_migrate_proposal_history_preserves_other_targets(history_path):
     unrelated = read_history("skill:unrelated", path=history_path)
     assert len(unrelated) == 1
     assert unrelated[0]["score"] == 0.9
+
+
+def test_prune_keeps_the_entry_the_cumulative_baseline_is_read_from(tmp_path):
+    """The earliest entry is often sizeless (a malformed, ambiguous or splice-refused
+    attempt records no sizes). Protecting only it let a count prune drop the first *sized*
+    entry and move original_size_for_target() from 1000 to 1200."""
+    history = tmp_path / "h.jsonl"
+    rows = [{"target": "skill:x", "timestamp": f"2026-10-0{i}T00:00:00+00:00", "passed": ok,
+             "score": 1.0, **sizes}
+            for i, (ok, sizes) in enumerate([
+                (False, {}),
+                (True, {"baseline_size": 1000, "content_size": 1100}),
+                (True, {"baseline_size": 1100, "content_size": 1200}),
+                (True, {"baseline_size": 1200, "content_size": 1300}),
+            ], start=1)]
+    history.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    evaluate.prune_history(path=str(history), retention="1",
+                           archive_path=str(tmp_path / "archive.jsonl"))
+
+    assert evaluate.original_size_for_target("skill:x", path=str(history)) == 1000
+
+
+def test_prune_keeps_the_earliest_content_size_when_no_baseline_was_recorded(tmp_path):
+    history = tmp_path / "h.jsonl"
+    rows = [{"target": "skill:x", "timestamp": f"2026-10-0{i}T00:00:00+00:00", "passed": True,
+             "score": 1.0, **sizes}
+            for i, sizes in enumerate([{}, {"content_size": 500}, {"content_size": 600},
+                                       {"content_size": 700}], start=1)]
+    history.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    evaluate.prune_history(path=str(history), retention="1",
+                           archive_path=str(tmp_path / "archive.jsonl"))
+
+    assert evaluate.original_size_for_target("skill:x", path=str(history)) == 500

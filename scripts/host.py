@@ -359,6 +359,8 @@ register_adapter("hermes", HermesAdapter())
 # fallbacks, never raising on a malformed line) rather than assuming a fixed schema.
 
 CLAUDE_CODE_HOME_ENV_VAR = "SKILL_EVOLUTION_CLAUDE_CODE_HOME"
+# Claude Code's own override for where it keeps its config, sessions and skills.
+CLAUDE_CONFIG_DIR_ENV_VAR = "CLAUDE_CONFIG_DIR"
 
 # How much of a fallback-derived title (first user message, no custom-title record) to
 # keep after redaction -- mirrors fetch_sessions._summarize_messages()'s content_preview
@@ -367,15 +369,24 @@ TITLE_FALLBACK_MAX_CHARS = 100
 
 
 def _default_claude_code_home() -> str:
-    """`~/.claude`, resolved at call time (not baked into a module constant at import) so
-    a test's monkeypatched HOME env var is honoured on every call, the same way
-    fetch_sessions.get_state_file()/get_state_db_path() re-read their env var at call
-    time rather than freezing it at import."""
+    """Where Claude Code itself keeps its tree: CLAUDE_CONFIG_DIR when set, else `~/.claude`.
+
+    Claude Code moves its whole config dir (projects/, skills/) to CLAUDE_CONFIG_DIR, so a
+    profile set up that way was invisible here: on the machine this was found on, the
+    shell's CLAUDE_CONFIG_DIR named one profile while the adapter read another. Resolved
+    at call time (not baked into a module constant at import) so a test's monkeypatched
+    environment is honoured on every call, the same way fetch_sessions.get_state_file()
+    re-reads its env var. A blank value is ignored.
+    """
+    configured = os.environ.get(CLAUDE_CONFIG_DIR_ENV_VAR, "").strip()
+    if configured:
+        return os.path.expanduser(configured)
     return os.path.expanduser("~/.claude")
 
 
 def _resolve_claude_code_home() -> str:
-    """Resolve the Claude Code home directory: SKILL_EVOLUTION_CLAUDE_CODE_HOME > `~/.claude`.
+    """Resolve the Claude Code home directory:
+    SKILL_EVOLUTION_CLAUDE_CODE_HOME > CLAUDE_CONFIG_DIR > `~/.claude`.
 
     Same call-time-env-read shape as fetch_sessions.get_state_file(): read at call time,
     blank ignored, so a test or an isolated run can redirect this adapter's root without
@@ -510,36 +521,20 @@ def _refuse_if_symlinked(skill_dir: Path, skill_md: Path) -> Optional[str]:
     return None
 
 
-def _rewrite_frontmatter_description(content: str, new_value: str) -> Optional[str]:
-    """Replace the single-line `description:` frontmatter value, or None if impossible.
-
-    Single-line values only -- matches skill_index.parse_name_description_frontmatter()'s
-    understanding of the hand-rolled format (no PyYAML). Returns None when the new value
-    contains a newline or the frontmatter has no `description:` line, so the caller fails
-    closed instead of corrupting the file.
-    """
-    if "\n" in new_value:
-        return None
-    lines = content.split("\n")
-    for i, line in enumerate(lines):
-        if line.startswith("description:"):
-            lines[i] = f"description: {new_value}"
-            return "\n".join(lines)
-    return None
-
-
 def _apply_body_change(body: str, change: Dict[str, Any]) -> Optional[str]:
     """Apply one `body` change to an in-memory copy of the skill text, or None to refuse.
 
-    old_value non-empty -> exact substring replace (first occurrence), allowing an empty
-    new_value (a deletion patch). old_value empty -> full replacement, requiring a
-    non-empty new_value. Anything that cannot be applied exactly returns None -- the
-    proposal is refused, never partially applied.
+    old_value non-empty -> exact substring replace, which requires the anchor to occur
+    exactly once: the gate refuses an ambiguous anchor (evaluate._splice_candidate), and
+    replacing "the first of several" here would write a change nobody evaluated.
+    old_value empty -> full replacement, requiring a non-empty new_value. Anything that
+    cannot be applied exactly returns None -- the proposal is refused, never partially
+    applied.
     """
     old_value = change.get("old_value") or ""
     new_value = change.get("new_value") or ""
     if old_value:
-        if old_value not in body:
+        if body.count(old_value) != 1:
             return None
         return body.replace(old_value, new_value, 1)
     if not new_value:
@@ -695,7 +690,7 @@ class ClaudeCodeAdapter(HostAdapter):
                 new_value = change.get("new_value")
                 if not new_value:
                     return _fail_write("description change has an empty new_value")
-                updated = _rewrite_frontmatter_description(content, new_value)
+                updated = skill_index.rewrite_frontmatter_description(content, new_value)
                 if updated is None:
                     return _fail_write(
                         f"description change for '{target}': no single-line description: line in frontmatter"
@@ -706,8 +701,8 @@ class ClaudeCodeAdapter(HostAdapter):
                 updated = _apply_body_change(content, change)
                 if updated is None:
                     return _fail_write(
-                        f"body change for '{target}': old_value not found in installed body "
-                        "(or empty replacement with no old_value)"
+                        f"body change for '{target}': old_value not found exactly once in the "
+                        "installed body (or empty replacement with no old_value)"
                     )
                 content = updated
                 changed_fields.append("body")

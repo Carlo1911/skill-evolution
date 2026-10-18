@@ -1,6 +1,7 @@
 """Tests for scripts/skill-quality-report.sh env-var handling."""
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -70,11 +71,18 @@ exit 0
 
 
 def test_wrapper_default_report_dir_is_repo_reports(tmp_path, monkeypatch):
-    """Without the env var, the wrapper falls back to <repo>/reports/.
+    """Without the env var, the wrapper falls back to <script dir>/../reports/.
 
-    We capture the --output argument the wrapper hands to skill_quality.py and
-    verify the path it produces is under the default <repo>/reports/ directory.
+    We capture the --output argument the wrapper hands to skill_quality.py and verify the
+    path it produces. The wrapper runs from a copy under tmp_path, laid out like the repo
+    (scripts/ beside reports/): run in place, its `mkdir -p` created <repo>/reports/ in a
+    fresh checkout -- harmless-looking locally, where the directory already existed, and
+    caught by the conftest guard in CI, where it did not.
     """
+    scripts_dir = tmp_path / "repo" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    wrapper_copy = scripts_dir / os.path.basename(WRAPPER)
+    shutil.copy2(WRAPPER, wrapper_copy)
     captured_output = tmp_path / "captured-output"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -83,7 +91,6 @@ def test_wrapper_default_report_dir_is_repo_reports(tmp_path, monkeypatch):
 while [ $# -gt 0 ]; do
   if [ "$1" = "--output" ]; then
     echo "$2" > {captured_output}
-    touch "$2"
   fi
   shift
 done
@@ -91,12 +98,14 @@ exit 0
 """)
     stub.chmod(0o755)
 
+    # The stub only records the path, so no report is written. The env var is dropped from the child's copy of
+    # the environment itself -- delenv after os.environ.copy() did not reach the child.
     env = os.environ.copy()
     env["PATH"] = str(bin_dir) + ":" + env.get("PATH", "")
-    monkeypatch.delenv("SKILL_EVOLUTION_QUALITY_REPORT_DIR", raising=False)
+    env.pop("SKILL_EVOLUTION_QUALITY_REPORT_DIR", None)
 
     result = subprocess.run(
-        [WRAPPER],
+        [str(wrapper_copy)],
         capture_output=True,
         text=True,
         env=env,
@@ -107,7 +116,7 @@ exit 0
     assert captured_output.is_file(), f"stub did not capture --output. stderr={result.stderr!r}"
 
     captured_path = captured_output.read_text().strip()
-    expected_reports_dir = os.path.realpath(os.path.join(REPO_ROOT, "reports"))
+    expected_reports_dir = os.path.realpath(str(tmp_path / "repo" / "reports"))
     actual_reports_dir = os.path.realpath(os.path.dirname(captured_path))
     assert actual_reports_dir == expected_reports_dir, (
         f"default report path {captured_path!r} resolves to {actual_reports_dir!r}, "

@@ -32,7 +32,7 @@ import evaluate
 import host
 import proposal as proposal_module
 import skill_index
-from proposal import ProposalStatus, ProposalType
+from proposal import ProposalType
 
 STATE_PRECEDENCE = ["unreadable", "duplicate_id", "incomplete", "ambiguous", "archived", "unresolved",
                     "stale"]
@@ -76,9 +76,9 @@ def _new_skill_name(p) -> Optional[str]:
 
 def _incomplete_reasons(p) -> List[str]:
     reasons = []
-    _, kind, _ = evaluate._extract_evaluated_content(p)
-    if kind == evaluate.MALFORMED_CONTENT_KIND:
-        reasons.append("a proposed change has an empty new_value")
+    problem = evaluate._structural_problem(p)
+    if problem:
+        reasons.append(problem)
     allowed = _SKILL_FIELDS.get(p.type)
     if allowed is not None:
         bad = sorted({c.field for c in p.proposed_changes
@@ -89,7 +89,7 @@ def _incomplete_reasons(p) -> List[str]:
             c.field.startswith("source_") for c in p.proposed_changes):
         reasons.append("merge_skills proposal has no source_* changes")
     _, plan_error = proposal_module._build_write_plan(p)
-    if plan_error:
+    if plan_error and plan_error not in reasons:
         reasons.append(plan_error)
     if p.type != ProposalType.CREATE_NEW and not p.target_skill:
         reasons.append("no target_skill")
@@ -112,12 +112,12 @@ def _diagnose_one(p, view: _SkillView) -> List[Dict[str, str]]:
             reasons.append({"code": "unresolved",
                             "detail": f"'{target}' is neither installed nor archived on this host"})
     elif not any(r["code"] == "incomplete" for r in reasons):
-        # The same anchor rule the gate applies (_splice_candidate), against the installed
-        # body -- what evaluate._resolve_baseline() resolves for an unambiguous live skill.
-        content, kind, claimed_old = evaluate._extract_evaluated_content(p)
+        # The same composition the gate applies (evaluate.compose_body_changes): every body
+        # change, in order, against the installed body -- so a stale anchor in an earlier
+        # change is caught, not only in the last one.
         baseline = view.body(target)
-        if kind == "body" and baseline is not None:
-            _, error = evaluate._splice_candidate(content, claimed_old, baseline, kind)
+        if baseline is not None and any(c.field == "body" for c in p.proposed_changes):
+            _, error = evaluate.compose_body_changes(p, baseline)
             if error:
                 reasons.append({"code": "stale", "detail": error})
     return reasons
@@ -198,7 +198,7 @@ def _id_conflicts(loaded, unreadable_files) -> Dict[str, Dict[str, str]]:
 def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -> List[Dict[str, Any]]:
     """Classify the proposals in `directory` (default: proposal.get_proposals_dir()).
 
-    Pending (`status: proposed`) proposals are classified unless `include_all`; the rest
+    Pending (`status: proposed` or `approved`) proposals are classified unless `include_all`; the rest
     still serve as reference for the duplicate rules. Unreadable files are always
     reported, since their status cannot be known.
     """
@@ -228,7 +228,7 @@ def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -
             r["reasons"].append(conflicts[r["file"]])
 
     def classified(p):
-        return include_all or p.status == ProposalStatus.PROPOSED
+        return include_all or p.status in proposal_module.PENDING_STATUSES
 
     pending = [p for _, p in loaded if classified(p)]
     reference = [p for _, p in loaded if not classified(p)]

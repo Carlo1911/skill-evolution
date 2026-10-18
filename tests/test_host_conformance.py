@@ -103,7 +103,13 @@ def _build_hermes_fixture(tmp_path, monkeypatch):
     excluded -- exercising both iter_sessions() and iter_skills() in one adapter."""
     db_path = str(tmp_path / "state.db")
     _make_hermes_db(db_path)
-    monkeypatch.setattr(fetch_sessions, "STATE_FILE", str(tmp_path / "skill_evolution_state.json"))
+    # HermesAdapter's state methods resolve their path through state.get_state_file(), not
+    # fetch_sessions.STATE_FILE -- patching only the latter let the mark/prune conformance
+    # tests write to (and prune) the real ~/.hermes/skill_evolution_state.json. The env var
+    # is honoured by both modules' get_state_file().
+    state_file = str(tmp_path / "skill_evolution_state.json")
+    monkeypatch.setattr(fetch_sessions, "STATE_FILE", state_file)
+    monkeypatch.setenv(fetch_sessions.STATE_FILE_ENV_VAR, state_file)
     monkeypatch.setenv(fetch_sessions.DB_PATH_ENV_VAR, db_path)
 
     skills_root = _skills_root(tmp_path)

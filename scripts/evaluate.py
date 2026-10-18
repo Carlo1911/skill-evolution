@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import re
 import secrets
@@ -22,7 +23,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Type
 
 from fetch_sessions import contains_secret, env_float, env_int, redact_pii
 from skill_index import parse_name_description_frontmatter
@@ -215,7 +216,9 @@ def append_history(target: str, result: EvalResult, session_ids: Optional[List[s
     `proposal:<id>` instead of folding it into the skill's lineage.
     """
     history_path = path or get_history_path()
-    os.makedirs(os.path.dirname(history_path), exist_ok=True)
+    # A bare file name has no directory part, and os.makedirs("") raises.
+    if os.path.dirname(history_path):
+        os.makedirs(os.path.dirname(history_path), exist_ok=True)
 
     entry = {
         "target": target,
@@ -253,12 +256,21 @@ def original_size_for_target(target: str, path: Optional[str] = None) -> Optiona
     """
     entries = [e for e in _read_all_entries(path or get_history_path())
                if e.get("target") == target]
-    for key in ("baseline_size", "content_size"):
-        for entry in entries:  # entries are chronological; first wins
-            value = entry.get(key)
-            if value:
-                return value
+    for key in _ORIGINAL_SIZE_KEYS:
+        entry = _earliest_with(entries, key)
+        if entry is not None:
+            return entry[key]
     return None
+
+
+# Read in this order by original_size_for_target(); prune_history() keeps the entry each
+# one resolves to, so pruning can never move the cumulative-drift baseline.
+_ORIGINAL_SIZE_KEYS = ("baseline_size", "content_size")
+
+
+def _earliest_with(entries: List[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
+    """The first (chronological) entry carrying a truthy `key`, or None."""
+    return next((entry for entry in entries if entry.get(key)), None)
 
 
 def _read_all_entries(path: str) -> List[Dict[str, Any]]:
@@ -295,20 +307,32 @@ def _parse_retention(raw: Optional[str]):
     if raw is None or not raw.strip():
         return None
     value = raw.strip()
-    if value.endswith("mo"):
-        return ("age_days", float(value[:-2]) * 30)
-    if value.endswith("d"):
-        return ("age_days", float(value[:-1]))
-    return ("count", int(value))
+    try:
+        if value.endswith("mo"):
+            rule = ("age_days", float(value[:-2]) * 30)
+        elif value.endswith("d"):
+            rule = ("age_days", float(value[:-1]))
+        else:
+            rule = ("count", int(value))
+    except ValueError:
+        rule = None
+    # A typo must not take the gate down: evaluate_and_record() prunes after appending
+    # history, so raising here turned every apply_proposal() into "evaluation gate raised".
+    # Warn and keep everything, like _env_number().
+    if rule is None or not math.isfinite(rule[1]):
+        print(f"warning: {HISTORY_RETENTION_ENV_VAR}={raw!r} is not a valid retention (N, Nd or Nmo); "
+              f"treating it as unbounded", file=sys.stderr)
+        return None
+    return rule
 
 
 def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
                    archive_path: Optional[str] = None) -> None:
     """Prune the shared history file per SKILL_EVOLUTION_HISTORY_RETENTION.
 
-    Per target, always retains up to three anchor entries regardless of the configured
+    Per target, always retains up to five anchor entries regardless of the configured
     limit, on top of whatever the count/age window itself keeps -- so the retained count per
-    target can exceed the limit by up to two entries. That's intentional:
+    target can exceed the limit by up to four entries. That's intentional:
 
     - The most recent entry -- needed by optimize_skill.find_low_scoring_targets(), which
       wants exactly this and is otherwise unaffected by pruning.
@@ -317,9 +341,10 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
       baseline followed by several failing retries could have the passing entry pruned
       while the failures (chronologically newer) survive, silently disabling regression
       coverage for exactly the targets that most need it.
-    - The earliest entry -- original_size_for_target() reads it as the cumulative-drift
-      baseline. Without this anchor, trimming a target's oldest entries would silently
-      shift that baseline forward, forgiving prior drift.
+    - The earliest entry, plus the earliest entries carrying `baseline_size` and
+      `content_size` -- original_size_for_target() reads those as the cumulative-drift
+      baseline. Without them, trimming a target's oldest entries would silently shift that
+      baseline forward, forgiving prior drift.
 
     Anchors are deduplicated by identity when they coincide (e.g. a target with no failures
     has most-recent == last-passing).
@@ -364,6 +389,14 @@ def prune_history(path: Optional[str] = None, retention: Optional[str] = None,
         if last_passing is not None:
             anchors.append(last_passing)
         anchors.append(target_entries[0])  # earliest
+        # The entries original_size_for_target() actually reads. The earliest entry is
+        # often sizeless -- a malformed, ambiguous or splice-refused attempt records no
+        # sizes -- so protecting only it let a count prune drop the first *sized* entry
+        # and silently move the cumulative baseline forward (1000B -> 1200B).
+        for key in _ORIGINAL_SIZE_KEYS:
+            sized = _earliest_with(target_entries, key)
+            if sized is not None:
+                anchors.append(sized)
 
         survivor_ids = {id(e) for e in survivors}
         for anchor in anchors:
@@ -1218,6 +1251,37 @@ class LLMJudgeEvaluator(Evaluator):
         avg_score = sum(float(parsed[k]) for k in self.RUBRIC_KEYS) / len(self.RUBRIC_KEYS)
         return avg_score, parsed
 
+    @classmethod
+    def _find_rubric_object(cls, raw: str) -> Dict[str, Any]:
+        """The judge's JSON object: the whole response, else the last embedded object that
+        carries every rubric key.
+
+        A greedy `\\{.*\\}` used to span from the first brace to the last, so a reasoning
+        model that mentioned `{frontmatter}` before its answer failed closed with
+        "malformed JSON". Each `{` is now tried with raw_decode, and the last object with
+        the rubric keys wins -- the answer comes after the reasoning. Validation of the
+        values is unchanged and still fails closed.
+        """
+        try:
+            whole = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            whole = None
+        if isinstance(whole, dict):
+            return whole
+        decoder = json.JSONDecoder()
+        found = None
+        for start in (i for i, ch in enumerate(raw) if ch == "{"):
+            try:
+                candidate, _ = decoder.raw_decode(raw, start)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and all(k in candidate for k in cls.RUBRIC_KEYS):
+                found = candidate
+        if found is None:
+            raise ValueError(f"no JSON object with the rubric keys found in judge response: "
+                             f"{raw[:200]!r}")
+        return found
+
     def _build_prompt(self, content: str) -> str:
         boundary = secrets.token_hex(16)
         return (
@@ -1233,16 +1297,7 @@ class LLMJudgeEvaluator(Evaluator):
         )
 
     def _parse_response(self, raw: str) -> Dict[str, Any]:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            raise ValueError(f"no JSON object found in judge response: {raw[:200]!r}")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"malformed JSON in judge response: {e}") from e
-
-        if not isinstance(parsed, dict):
-            raise ValueError("judge response JSON is not an object")
+        parsed = self._find_rubric_object(raw)
 
         for key in self.RUBRIC_KEYS:
             if key not in parsed:
@@ -1590,6 +1645,33 @@ def target_key_for_proposal(proposal: Any) -> str:
 MALFORMED_CONTENT_KIND = "malformed"
 
 
+def _structural_problem(proposal: Any) -> Optional[str]:
+    """Why a proposal's body/description changes cannot be evaluated or applied, or None.
+
+    Checked over *every* such change, not one per field: the gate used to look at only
+    the last change of each kind while apply wrote all of them, so an earlier change with
+    an empty new_value went through unexamined -- the Hermes adapter emitted a `patch`
+    with nothing to patch, and the Claude Code adapter deleted the anchor text outright.
+    """
+    changes = [c for c in getattr(proposal, "proposed_changes", [])
+               if getattr(c, "field", None) in ("body", "description")]
+    total = len(changes)
+    for index, change in enumerate(changes, start=1):
+        if not getattr(change, "new_value", None):
+            where = f" (change {index} of {total})" if total > 1 else ""
+            return (f"proposal declares a {change.field!r} change{where} but its new_value is "
+                    f"empty, so there is no text to evaluate or apply")
+    bodies = [c for c in changes if c.field == "body"]
+    descriptions = [c for c in changes if c.field == "description"]
+    if len(descriptions) > 1:
+        return (f"proposal declares {len(descriptions)} 'description' changes; a skill has one "
+                f"description, so they must be merged into a single change")
+    if len(bodies) > 1 and any(not getattr(c, "old_value", None) for c in bodies):
+        return ("a 'body' change without old_value replaces the whole body, so it must be the "
+                "proposal's only body change")
+    return None
+
+
 def _extract_evaluated_content(proposal: Any) -> Tuple[str, str, Optional[str]]:
     """Return (content, content_kind, baseline) for the text a proposal wants evaluated.
 
@@ -1621,6 +1703,10 @@ def _extract_evaluated_content(proposal: Any) -> Tuple[str, str, Optional[str]]:
        something rather than skipped. This fallback is deliberately *not* a catch-all for
        case 2.
     """
+    problem = _structural_problem(proposal)
+    if problem is not None:
+        return problem, MALFORMED_CONTENT_KIND, None
+
     changes = getattr(proposal, "proposed_changes", [])
     by_kind = {
         change.field: change
@@ -1797,17 +1883,96 @@ def _splice_candidate(content: str, claimed_old: Optional[str],
     )
 
 
+class Candidate(NamedTuple):
+    """The text the skill target evaluates for a proposal -- what apply would write.
+
+    `kind` is "body", "description", "summary_rationale" or MALFORMED_CONTENT_KIND (then
+    `content` is the reason). `error` set means the changes do not apply to the installed
+    skill (stale or ambiguous anchor, or nothing to verify them against): fail closed.
+    """
+    content: str
+    kind: str
+    baseline: Optional[str]
+    baseline_on_disk: bool
+    error: Optional[str] = None
+
+
+def compose_body_changes(proposal: Any, installed: str) -> Tuple[str, Optional[str]]:
+    """Apply every body change, then any description change, to `installed` -- in list
+    order, each anchor matched against the text the earlier changes already produced,
+    which is how both adapters apply them. Returns (text, error).
+
+    Each anchor must occur exactly once (_splice_candidate's rule); with several changes
+    the error names which one failed. A description change is folded into the composed
+    file's frontmatter, so the gate scores the file apply writes rather than the body
+    alone. Callers must have rejected _structural_problem() first.
+    """
+    import skill_index
+
+    changes = getattr(proposal, "proposed_changes", [])
+    bodies = [c for c in changes if c.field == "body"]
+    total = len(bodies)
+    text = installed
+    for index, change in enumerate(bodies, start=1):
+        if not change.old_value:
+            text = change.new_value  # whole-body replacement; validated to be the only one
+            continue
+        spliced, error = _splice_candidate(change.new_value, change.old_value, text, "body")
+        if error is not None:
+            return text, (f"change {index} of {total}: {error}" if total > 1 else error)
+        text = spliced
+    description = next((c for c in changes if c.field == "description"), None)
+    if description is not None and bodies:
+        rewritten = skill_index.rewrite_frontmatter_description(text, description.new_value)
+        if rewritten is None:
+            return text, ("the description change cannot be applied: the skill has no "
+                          "single-line `description:` in its frontmatter")
+        text = rewritten
+    return text, None
+
+
+def _build_candidate(proposal: Any) -> Candidate:
+    """The single derivation of what the skill target evaluates for `proposal`.
+
+    Shared by the gate (_evaluate_candidate) and the history sizes evaluate_and_record()
+    records, so the size judged and the size recorded cannot drift apart. Body changes are
+    composed onto the *installed* skill (compose_body_changes). Without an installed body
+    a single change keeps the old best-effort fallback to its own old_value; several
+    changes fail closed, since nothing could tell whether they apply together.
+    """
+    content, kind, claimed_old = _extract_evaluated_content(proposal)
+    if kind == MALFORMED_CONTENT_KIND:
+        return Candidate(content, kind, None, False)
+    if kind != "body":
+        baseline, on_disk = _resolve_baseline(proposal, kind, claimed_old)
+        return Candidate(content, kind, baseline, on_disk)
+
+    bodies = [c for c in proposal.proposed_changes if c.field == "body"]
+    installed, on_disk = _resolve_baseline(proposal, kind, claimed_old)
+    if not on_disk:
+        if len(bodies) > 1:
+            return Candidate(content, kind, installed, False,
+                             f"{len(bodies)} body changes cannot be verified without the "
+                             f"installed skill to apply them to")
+        spliced, error = _splice_candidate(content, claimed_old, installed, kind)
+        return Candidate(spliced, kind, installed, False, error)
+    composed, error = compose_body_changes(proposal, installed)
+    return Candidate(composed, kind, installed, True, error)
+
+
 def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     """Evaluate a proposal's skill-text content end to end.
 
-    Extracts the skill body/description change from `proposal.proposed_changes`,
-    falling back to summary+rationale for proposal shapes without one (e.g.
-    merge_skills, which has no single body/description field) so nothing is
-    silently skipped, then runs the extracted content through the enabled
-    evaluators and gate combination.
+    Scores what apply would write (_build_candidate): every body change composed onto the
+    installed skill, a bare description change, or -- for shapes with no such field, e.g.
+    merge_skills -- summary+rationale, so nothing is silently skipped.
     """
+    return _evaluate_candidate(proposal, _build_candidate(proposal))
+
+
+def _evaluate_candidate(proposal: Any, candidate: Candidate) -> List[EvalResult]:
+    """Run the skill target's evaluators over an already-built Candidate."""
     target = target_key_for_proposal(proposal)
-    content, content_kind, claimed_old = _extract_evaluated_content(proposal)
 
     # A change with an empty new_value has no text to score and nothing to apply, so no
     # evaluator can say anything useful about it. Fail closed here rather than running the
@@ -1815,10 +1980,10 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # prose that is not the proposed change, and the deterministic guards would silently go
     # inert (see _extract_evaluated_content case 2). Returned as a result rather than raised
     # so apply_proposal() and retroactive_reevaluate() get the ordinary failing-gate path.
-    if content_kind == MALFORMED_CONTENT_KIND:
+    if candidate.kind == MALFORMED_CONTENT_KIND:
         return [EvalResult(
             score=0.0,
-            feedback=f"malformed proposal: {content}",
+            feedback=f"malformed proposal: {candidate.content}",
             passed=False,
             evaluator_name="structure",
         )]
@@ -1827,7 +1992,18 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     if ambiguous is not None:
         return [ambiguous]
 
-    context = {"content_kind": content_kind}
+    # A stale/ambiguous anchor in any change, or several changes with nothing to apply
+    # them to, fails closed here rather than spending provider calls on an unapplicable
+    # change.
+    if candidate.error is not None:
+        return [EvalResult(
+            score=0.0,
+            feedback=f"splice refused: {candidate.error}",
+            passed=False,
+            evaluator_name="structure",
+        )]
+
+    context = {"content_kind": candidate.kind}
     # DeterministicEvaluator's growth-vs-baseline guard is inert unless it gets
     # baseline_size, so a change replacing existing text must carry the size of the text
     # it replaces. Measured the same way the evaluator measures the candidate (utf-8
@@ -1835,23 +2011,8 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # rather than dividing by a zero baseline. _resolve_baseline() prefers the installed
     # skill over the proposal's own claim -- see its docstring for why that matters now
     # that the cap is a ratchet.
-    baseline, baseline_on_disk = _resolve_baseline(proposal, content_kind, claimed_old)
-    if baseline:
-        context["baseline_size"] = len(baseline.encode("utf-8"))
-
-    # Fragment-style body proposals (the analyzer's canonical format) would
-    # otherwise score the fragment verbatim against the full baseline and
-    # always fail the shrink floor. Splice first so the gate judges the text
-    # apply will actually write. A stale/ambiguous anchor fails closed here
-    # rather than spending provider calls on an unapplicable change.
-    content, splice_error = _splice_candidate(content, claimed_old, baseline, content_kind)
-    if splice_error is not None:
-        return [EvalResult(
-            score=0.0,
-            feedback=f"splice refused: {splice_error}",
-            passed=False,
-            evaluator_name="structure",
-        )]
+    if candidate.baseline:
+        context["baseline_size"] = len(candidate.baseline.encode("utf-8"))
 
     # Second reference point: where this target started, so drift spread across several
     # individually-compliant passes is still caught. Absent history leaves it inert.
@@ -1864,13 +2025,13 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # new skill, duplicates among the installed ones. Built only when that evaluator is
     # enabled -- the duplicate set reads every installed skill.
     if "embedding_similarity" in _enabled_evaluator_names():
-        if content_kind == "body" and baseline_on_disk:
-            context["baseline"] = baseline
-        elif (content_kind == "body"
+        if candidate.kind == "body" and candidate.baseline_on_disk:
+            context["baseline"] = candidate.baseline
+        elif (candidate.kind == "body"
               and getattr(getattr(proposal, "type", None), "value", None) == "create_new"):
             context["existing_skills"] = _installed_skills_for_comparison()
 
-    return run_evaluators(content, target, context=context)
+    return run_evaluators(candidate.content, target, context=context)
 
 
 def evaluate_proposal(proposal: Any) -> List[EvalResult]:
@@ -2206,36 +2367,27 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         target = target_key_for_proposal(proposal)
         skill_results = evaluate_skill_text(proposal)
         # Record the sizes this decision was made over, so original_size_for_target() can
-        # later measure cumulative drift against where the target started. Resolved the same
-        # way evaluate_skill_text() resolved it, so the size recorded is the size that was
-        # actually judged. A malformed proposal records no sizes at all: its "content" is an
-        # error message, and original_size_for_target() takes the *earliest* non-empty
-        # content_size as the cumulative-drift baseline -- so persisting ~100 bytes of
-        # explanatory prose here would become "where this skill started" and make every
-        # later cumulative check nonsense (a real body would read as several-thousand-percent
-        # growth). Omitting both sizes leaves the lookup skipping this entry.
-        content, content_kind, claimed_old = _extract_evaluated_content(proposal)
-        # An ambiguous target was refused before any baseline was read; sizing it now
-        # would record the analyzer's own old_value as where the skill started.
-        if content_kind == MALFORMED_CONTENT_KIND or _ambiguous_target_result(proposal) is not None:
+        # later measure cumulative drift against where the target started -- derived by the
+        # same _build_candidate() evaluate_skill_text() judged, so the size recorded is the
+        # size scored. (Built a second time rather than threaded through: tests substitute
+        # evaluate_skill_text(proposal) wholesale, and that one-argument seam stays.) A
+        # malformed, ambiguous or unapplicable proposal records no sizes at all: its
+        # "content" is an error message or an unspliced fragment, and
+        # original_size_for_target() takes the *earliest* sized entry as the cumulative-drift
+        # baseline -- persisting that would become "where this skill started" and make
+        # every later cumulative check nonsense.
+        candidate = _build_candidate(proposal)
+        if (candidate.kind == MALFORMED_CONTENT_KIND or candidate.error is not None
+                or _ambiguous_target_result(proposal) is not None):
             _record_target("skill", target, skill_results, kind="skill_text")
         else:
-            baseline, _ = _resolve_baseline(proposal, content_kind, claimed_old)
-            # Mirror evaluate_skill_text()'s splice so the recorded size is
-            # the size that was actually judged. On splice refusal (or when
-            # there is nothing to splice) record without sizes -- persisting
-            # the fragment's ~1KB as "where this skill started" would poison
-            # every later cumulative check, same reason malformed records none.
-            spliced, splice_error = _splice_candidate(content, claimed_old, baseline, content_kind)
-            if splice_error is not None:
-                _record_target("skill", target, skill_results, kind="skill_text")
-            else:
-                _record_target(
-                    "skill", target, skill_results,
-                    content_size=len(spliced.encode("utf-8")),
-                    baseline_size=len(baseline.encode("utf-8")) if baseline else None,
-                    kind="skill_text",
-                )
+            _record_target(
+                "skill", target, skill_results,
+                content_size=len(candidate.content.encode("utf-8")),
+                baseline_size=(len(candidate.baseline.encode("utf-8"))
+                               if candidate.baseline else None),
+                kind="skill_text",
+            )
 
     if "proposal" in resolved_targets:
         proposal_id = getattr(proposal, "proposal_id", "unknown")
@@ -2259,7 +2411,12 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
     )
 
     if auto_prune:
-        prune_history()
+        # Housekeeping after the gate decision and its history entries: a pruning failure
+        # must not turn a decided gate into "evaluation gate raised" in apply_proposal().
+        try:
+            prune_history()
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: history pruning failed and was skipped: {e}", file=sys.stderr)
 
     return all_results, combined_result, gate_passed
 
@@ -2271,8 +2428,8 @@ def _select_retroactive_proposals(target: Optional[str] = None, since: Optional[
                                    include_all_statuses: bool = False) -> List[Any]:
     """Load already-saved proposals from disk, optionally filtered by target key and creation date.
 
-    Defaults to `status == proposed` only -- rejected/applied proposals are not live
-    decisions and must not inject scores into the same history stream the live
+    Defaults to pending proposals only (`proposed` or `approved`, proposal.PENDING_STATUSES)
+    -- rejected/applied proposals are not live decisions and must not inject scores into the same history stream the live
     apply_proposal() gate regresses against. Pass `include_all_statuses=True` to opt in.
     """
     import proposal as proposal_module  # local import: breaks the proposal.py <-> evaluate.py cycle
@@ -2280,7 +2437,7 @@ def _select_retroactive_proposals(target: Optional[str] = None, since: Optional[
     proposals = proposal_module.list_proposals(directory=proposals_dir)
 
     if not include_all_statuses:
-        proposals = [p for p in proposals if p.status == proposal_module.ProposalStatus.PROPOSED]
+        proposals = [p for p in proposals if p.status in proposal_module.PENDING_STATUSES]
 
     if target:
         proposals = [p for p in proposals if target_key_for_proposal(p) == target]
@@ -2315,7 +2472,7 @@ def retroactive_reevaluate(target: Optional[str] = None, since: Optional[str] = 
     Appends a fresh combined history entry per proposal target rather than
     mutating or overwriting any existing entry for that target.
 
-    Defaults to `status == proposed` only; `include_all_statuses=True` re-scores
+    Defaults to pending proposals (`proposed` or `approved`); `include_all_statuses=True` re-scores
     rejected/applied proposals too, which injects entries into the same history
     stream the live apply_proposal() gate regresses against -- see
     _select_retroactive_proposals().
@@ -2365,7 +2522,7 @@ def main():
     parser.add_argument("--target", type=str, default=None, help="Filter retroactive re-evaluation to a single target")
     parser.add_argument("--since", type=str, default=None, help="Only re-evaluate proposals created at/after this ISO date")
     parser.add_argument("--all-statuses", action="store_true", help="With --retroactive, re-evaluate proposals regardless of status "
-                                                                     "(default: status == proposed only)")
+                                                                     "(default: pending -- proposed or approved -- only)")
     parser.add_argument("--dry-run", action="store_true", help="With --retroactive, report what would run without appending history")
     parser.add_argument("--prune", action="store_true", help="Prune history per SKILL_EVOLUTION_HISTORY_RETENTION and exit")
     parser.add_argument("--backfill-transport-failures", action="store_true",
