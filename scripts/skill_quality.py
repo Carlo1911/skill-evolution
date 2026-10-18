@@ -134,13 +134,9 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
         
         # Abstentions ("not applicable") count neither in the mean nor in the verdict.
         scored = evaluate.applicable(results)
-
-        # Calculate mean score
-        scores = [r.score for r in scored if r.score is not None]
-        if not scores:
+        if not scored:
             return None
-        
-        current_score = sum(scores) / len(scores)
+        current_score = evaluate.mean_score(results, default=0.0)
         
         # Get feedback from LLM judge if available
         feedback = ""
@@ -150,7 +146,7 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
                 break
         
         # Check if passed (all evaluators must pass in strict mode)
-        passed = all(r.passed for r in scored if r.score is not None)
+        passed = all(r.passed for r in scored)
         
         # Record the evaluation in history
         target = f"skill:{skill_name}"
@@ -164,7 +160,7 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
             feedback=feedback,
             passed=passed,
             evaluator_name="gate",
-            transport_failure=any(getattr(r, "transport_failure", False) for r in results),
+            transport_failure=evaluate.any_transport_failure(results),
         )
         
         # Append to history

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import time
 import urllib.error
@@ -20,6 +21,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 from fetch_sessions import contains_secret, env_float, env_int, redact_pii
@@ -59,6 +61,18 @@ class EvalResult:
 def applicable(results: List["EvalResult"]) -> List["EvalResult"]:
     """The results that count: everything except `not_applicable` abstentions."""
     return [r for r in results if not r.not_applicable]
+
+
+def mean_score(results: List["EvalResult"], default: float) -> float:
+    """Mean score over the applicable results; `default` when none count."""
+    scored = applicable(results)
+    return sum(r.score for r in scored) / len(scored) if scored else default
+
+
+def any_transport_failure(results: List["EvalResult"]) -> bool:
+    """True when any result failed on a provider/transport fault. Every gate-entry write
+    path flags its entry with this, so an outage never reads as a quality signal."""
+    return any(getattr(r, "transport_failure", False) for r in results)
 
 
 def _verdict(result: "EvalResult") -> str:
@@ -109,12 +123,8 @@ def register_evaluator(name: str, cls: Type[Evaluator]) -> None:
     REGISTRY[name] = cls
 
 
-def get_enabled_evaluators(env_value: Optional[str] = None) -> List[Evaluator]:
-    """Resolve the enabled evaluator instances from SKILL_EVOLUTION_EVALUATORS.
-
-    Falls back to DEFAULT_EVALUATORS when the env var is unset, empty, or
-    whitespace-only. Raises ValueError for any name not present in REGISTRY.
-    """
+def _enabled_evaluator_names(env_value: Optional[str] = None) -> List[str]:
+    """The evaluator names SKILL_EVOLUTION_EVALUATORS selects, defaults applied."""
     raw = env_value if env_value is not None else os.environ.get(EVALUATORS_ENV_VAR)
     if raw is None or not raw.strip():
         raw = DEFAULT_EVALUATORS
@@ -122,9 +132,17 @@ def get_enabled_evaluators(env_value: Optional[str] = None) -> List[Evaluator]:
     names = [n.strip() for n in raw.split(",") if n.strip()]
     if not names:
         names = [n.strip() for n in DEFAULT_EVALUATORS.split(",")]
+    return names
 
+
+def get_enabled_evaluators(env_value: Optional[str] = None) -> List[Evaluator]:
+    """Resolve the enabled evaluator instances from SKILL_EVOLUTION_EVALUATORS.
+
+    Falls back to DEFAULT_EVALUATORS when the env var is unset, empty, or
+    whitespace-only. Raises ValueError for any name not present in REGISTRY.
+    """
     evaluators = []
-    for name in names:
+    for name in _enabled_evaluator_names(env_value):
         if name not in REGISTRY:
             raise ValueError(
                 f"Unknown evaluator '{name}' in {EVALUATORS_ENV_VAR}. "
@@ -504,9 +522,8 @@ def backfill_transport_failures(path: Optional[str] = None, apply: bool = False)
     report["targets"] = len(targets)
 
     if apply and report["matched"]:
-        import shutil
-        from pathlib import Path
-        import host  # local, like every other host use in this module
+        import host
+
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup_path = f"{history_path}.bak-{stamp}"
         shutil.copy2(history_path, backup_path)
@@ -1482,8 +1499,7 @@ def run_evaluators(content: str, target: str, context: Optional[Dict[str, Any]] 
     results: List[EvalResult] = [_run_one(e, content, base_context) for e in automatic]
 
     if regression_evaluators or human_review_evaluators:
-        scored = applicable(results)
-        aggregate_score = sum(r.score for r in scored) / len(scored) if scored else 0.0
+        aggregate_score = mean_score(results, default=0.0)
         post_context = dict(base_context)
         post_context["new_score"] = aggregate_score
         results.extend(_run_one(e, content, post_context) for e in regression_evaluators)
@@ -1809,7 +1825,7 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # against the installed body (never against the proposal's own old_value), or, for a
     # new skill, duplicates among the installed ones. Built only when that evaluator is
     # enabled -- the duplicate set reads every installed skill.
-    if any(e.name == "embedding_similarity" for e in get_enabled_evaluators()):
+    if "embedding_similarity" in _enabled_evaluator_names():
         if content_kind == "body" and baseline_on_disk:
             context["baseline"] = baseline
         elif (content_kind == "body"
@@ -2131,9 +2147,8 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         # A provider fault in any of this target's evaluators makes *its* entry's failure
         # transport-caused: a human reviewer (and find_low_scoring_targets) must be able
         # to tell an outage-driven 0.0 from a genuine regression.
-        transport_failure = any(getattr(r, "transport_failure", False) for r in results)
-        scored = applicable(results)
-        score = sum(r.score for r in scored) / len(scored) if scored else 1.0
+        transport_failure = any_transport_failure(results)
+        score = mean_score(results, default=1.0)
         score_sum += score
         score_count += 1
         feedback = (
@@ -2293,13 +2308,12 @@ def _cli_gate_result(results: List[EvalResult]) -> EvalResult:
     does: without it a provider outage during `--eval-target ...` is recorded as a
     content failure.
     """
-    scored = applicable(results)
     return EvalResult(
-        score=sum(r.score for r in scored) / len(scored) if scored else 0,
-        passed=all(r.passed for r in scored),
+        score=mean_score(results, default=0),
+        passed=all(r.passed for r in applicable(results)),
         evaluator_name="gate",
         feedback="; ".join(f"{r.evaluator_name}={_verdict(r)}" for r in results),
-        transport_failure=any(getattr(r, "transport_failure", False) for r in results),
+        transport_failure=any_transport_failure(results),
     )
 
 

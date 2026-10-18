@@ -14,8 +14,8 @@ would not make it applicable. Possible duplicates are flagged on top of the stat
 deterministic text rules only.
 
 Every check is mechanical and reuses what the gate and apply path already use
-(_extract_evaluated_content, _resolve_baseline, _splice_candidate, _build_write_plan),
-reading skills through the active host adapter. Nothing calls a provider, and nothing is
+(_extract_evaluated_content, _splice_candidate, _build_write_plan), reading skills
+through the active host adapter -- one scan per run, each installed body read once. Nothing calls a provider, and nothing is
 written: the persisted `status` stays the reviewer's decision.
 """
 
@@ -26,7 +26,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import evaluate
 import host
@@ -43,6 +43,25 @@ _SKILL_FIELDS = {
     ProposalType.CREATE_NEW: {"name", "description", "category", "body"},
     ProposalType.MERGE_SKILLS: {"body", "description"},
 }
+
+
+class _SkillView(NamedTuple):
+    """What the active host has installed and archived, gathered once per run."""
+    live_by_name: Dict[str, List[Dict[str, Any]]]
+    ambiguous: Dict[str, List[str]]  # name -> distinct real paths (find_duplicate_names)
+    archived_names: set
+    bodies: Dict[str, Optional[str]]  # memoized installed bodies of unambiguous names
+
+    def body(self, name: str) -> Optional[str]:
+        """The installed body of an unambiguous live skill, read once and memoized --
+        evaluate.installed_skill_body() would re-scan the whole tree per call."""
+        if name not in self.bodies:
+            try:
+                with open(self.live_by_name[name][0]["path"], encoding="utf-8") as f:
+                    self.bodies[name] = f.read()
+            except OSError:
+                self.bodies[name] = None
+        return self.bodies[name]
 
 
 def _normalize(text: Optional[str]) -> str:
@@ -71,32 +90,34 @@ def _incomplete_reasons(p) -> List[str]:
     return reasons
 
 
-def _diagnose_one(p, live_by_name, ambiguous_names, archived_names) -> List[Dict[str, str]]:
+def _diagnose_one(p, view: _SkillView) -> List[Dict[str, str]]:
     reasons = [{"code": "incomplete", "detail": r} for r in _incomplete_reasons(p)]
     if p.type == ProposalType.CREATE_NEW or not p.target_skill:
         return reasons
 
     target = p.target_skill
-    if target in ambiguous_names:
-        paths = ", ".join(r["path"] for r in live_by_name[target])
+    if target in view.ambiguous:
+        paths = ", ".join(view.ambiguous[target])
         reasons.append({"code": "ambiguous", "detail": f"'{target}' is declared by several files: {paths}"})
-    elif target not in live_by_name:
-        if target in archived_names:
+    elif target not in view.live_by_name:
+        if target in view.archived_names:
             reasons.append({"code": "archived", "detail": f"'{target}' exists only in the host's archive"})
         else:
             reasons.append({"code": "unresolved",
                             "detail": f"'{target}' is neither installed nor archived on this host"})
     elif not any(r["code"] == "incomplete" for r in reasons):
+        # The same anchor rule the gate applies (_splice_candidate), against the installed
+        # body -- what evaluate._resolve_baseline() resolves for an unambiguous live skill.
         content, kind, claimed_old = evaluate._extract_evaluated_content(p)
-        baseline, on_disk = evaluate._resolve_baseline(p, kind, claimed_old)
-        if kind == "body" and on_disk:
+        baseline = view.body(target)
+        if kind == "body" and baseline is not None:
             _, error = evaluate._splice_candidate(content, claimed_old, baseline, kind)
             if error:
                 reasons.append({"code": "stale", "detail": error})
     return reasons
 
 
-def _duplicate_flags(pending, reference, live_by_name, ambiguous_names) -> Dict[str, List[Dict[str, str]]]:
+def _duplicate_flags(pending, reference, view: _SkillView) -> Dict[str, List[Dict[str, str]]]:
     """Possible-duplicate flags per pending proposal id, from four text rules."""
     flags: Dict[str, List[Dict[str, str]]] = defaultdict(list)
 
@@ -128,12 +149,12 @@ def _duplicate_flags(pending, reference, live_by_name, ambiguous_names) -> Dict[
     for p in pending:
         if p.type == ProposalType.CREATE_NEW:
             name = next((c.new_value for c in p.proposed_changes if c.field == "name" and c.new_value), None)
-            if name and name in live_by_name:
+            if name and name in view.live_by_name:
                 flags[p.proposal_id].append({"other": None, "detail": f"skill '{name}' already exists"})
             continue
         target = p.target_skill
-        if target in live_by_name and target not in ambiguous_names:
-            body = evaluate.installed_skill_body(target) or ""
+        if target in view.live_by_name and target not in view.ambiguous:
+            body = view.body(target) or ""
             for c in p.proposed_changes:
                 if c.field == "body" and c.new_value and c.new_value.strip() in body:
                     flags[p.proposal_id].append(
@@ -155,8 +176,8 @@ def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -
     live_by_name: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for record in live:
         live_by_name[record["name"]].append(record)
-    ambiguous_names = set(skill_index.find_duplicate_names(live))
-    archived_names = {r["name"] for r in adapter.iter_archived_skills()}
+    view = _SkillView(live_by_name, skill_index.find_duplicate_names(live),
+                      {r["name"] for r in adapter.iter_archived_skills()}, {})
 
     results: List[Dict[str, Any]] = []
     loaded = []
@@ -174,12 +195,12 @@ def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -
 
     pending = [p for _, p in loaded if classified(p)]
     reference = [p for _, p in loaded if not classified(p)]
-    flags = _duplicate_flags(pending, reference, live_by_name, ambiguous_names)
+    flags = _duplicate_flags(pending, reference, view)
 
     for fname, p in loaded:
         if not classified(p):
             continue
-        reasons = _diagnose_one(p, live_by_name, ambiguous_names, archived_names)
+        reasons = _diagnose_one(p, view)
         codes = [r["code"] for r in reasons]
         state = next((s for s in STATE_PRECEDENCE if s in codes), "valid")
         results.append({"file": fname, "proposal_id": p.proposal_id, "type": p.type.value,

@@ -62,8 +62,7 @@ def _windows(text: str, limit: int = DRIFT_WINDOW_CHARS) -> List[str]:
                 windows.append(current)
                 current = ""
             current += line
-        if current.strip():
-            windows.append(current)
+        windows.append(current)
     return [w for w in windows if w.strip()] or [text[:limit]]
 
 
