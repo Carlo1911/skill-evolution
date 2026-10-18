@@ -413,6 +413,83 @@ def migrate_proposal_history(proposal_id: str, new_target: str,
     return len(to_migrate)
 
 
+# What follows `llm_judge failed closed: ` when the judge's call raised a ProviderError --
+# the shapes call_provider() and the per-provider callers emit. Judge *parse* errors
+# share the prefix (they also fail closed, without the transport flag), so matching the
+# prefix alone would relabel a genuine bad response as an outage.
+_PROVIDER_FAULT_FEEDBACK = re.compile(
+    r"^llm_judge failed closed: (?:"
+    r"All \d+ provider\(s\) failed: "
+    r"|Unknown provider\(s\) '"
+    r"|[^:]{1,40} provider call failed: "
+    r"|Unexpected [^:]{1,40} response shape: "
+    r"|[^:]{1,40} provider selected but \S+ is not set\. "
+    r")"
+)
+
+
+def backfill_transport_failures(path: Optional[str] = None, apply: bool = False) -> Dict[str, Any]:
+    """Mark history entries that recorded a provider fault without `transport_failure`.
+
+    Before every gate-entry path carried the flag (skill_quality.py, the single-target
+    CLI), a provider outage was written as an ordinary failed evaluation, and
+    find_low_scoring_targets() reads those as quality signals. This adds
+    `transport_failure: true` to gate entries that failed, are not yet flagged, and whose
+    feedback is exactly a provider-fault message (_PROVIDER_FAULT_FEEDBACK). Entries that
+    only say `<target>/llm_judge=fail` carry no cause and are left alone.
+
+    Report-only unless `apply=True`. Applying first copies the file byte for byte to a
+    timestamped `<path>.bak-<UTC>` sibling, then rewrites atomically. The rewrite goes
+    line by line: unmatched lines -- including ones that are not valid JSON, which
+    _read_all_entries() would silently drop -- are written back verbatim. Idempotent:
+    flagged entries never match again.
+    """
+    history_path = path or get_history_path()
+    report: Dict[str, Any] = {"matched": 0, "entries": 0, "unparseable": 0,
+                              "targets": 0, "backup_path": None}
+    try:
+        with open(history_path) as f:
+            lines = f.read().splitlines(keepends=True)
+    except FileNotFoundError:
+        return report
+
+    out = []
+    targets = set()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            out.append(line)
+            continue
+        try:
+            entry = json.loads(stripped)
+        except json.JSONDecodeError:
+            report["unparseable"] += 1
+            out.append(line)
+            continue
+        report["entries"] += 1
+        if (entry.get("evaluator_name") == "gate" and entry.get("passed") is False
+                and not entry.get("transport_failure")
+                and _PROVIDER_FAULT_FEEDBACK.match(entry.get("feedback") or "")):
+            entry["transport_failure"] = True
+            report["matched"] += 1
+            targets.add(entry.get("target"))
+            out.append(json.dumps(entry) + "\n")
+        else:
+            out.append(line)
+    report["targets"] = len(targets)
+
+    if apply and report["matched"]:
+        import shutil
+        from pathlib import Path
+        import host  # local, like every other host use in this module
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = f"{history_path}.bak-{stamp}"
+        shutil.copy2(history_path, backup_path)
+        report["backup_path"] = backup_path
+        host._atomic_write_text(Path(history_path), "".join(out))
+    return report
+
+
 # ── Provider adapter layer (stdlib-only HTTP) ────────────────────────
 
 PROVIDER_ENV_VAR = "SKILL_EVOLUTION_PROVIDER"
@@ -2140,6 +2217,22 @@ def retroactive_reevaluate(target: Optional[str] = None, since: Optional[str] = 
     return summaries
 
 
+def _cli_gate_result(results: List[EvalResult]) -> EvalResult:
+    """Combine a single-target CLI run's results into the gate entry it records.
+
+    Carries `transport_failure` forward the way evaluate_and_record()'s _record_target
+    does: without it a provider outage during `--eval-target ...` is recorded as a
+    content failure.
+    """
+    return EvalResult(
+        score=sum(r.score for r in results) / len(results) if results else 0,
+        passed=all(r.passed for r in results),
+        evaluator_name="gate",
+        feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
+        transport_failure=any(getattr(r, "transport_failure", False) for r in results),
+    )
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Skill evolution evaluation tools")
@@ -2151,6 +2244,11 @@ def main():
                                                                      "(default: status == proposed only)")
     parser.add_argument("--dry-run", action="store_true", help="With --retroactive, report what would run without appending history")
     parser.add_argument("--prune", action="store_true", help="Prune history per SKILL_EVOLUTION_HISTORY_RETENTION and exit")
+    parser.add_argument("--backfill-transport-failures", action="store_true",
+                        help="Report history entries that recorded a provider fault without the "
+                             "transport_failure flag (add --apply to mark them; a backup is kept)")
+    parser.add_argument("--apply", action="store_true",
+                        help="With --backfill-transport-failures, rewrite the history file")
     # New: one-off evaluation of any of the four targets
     parser.add_argument("--eval-target", choices=["skill", "proposal", "tool_calls", "analyzer_prompt"],
                         default="skill", help="Which target to evaluate (default: skill)")
@@ -2166,6 +2264,18 @@ def main():
         archive_after = len(_read_all_entries(get_history_archive_path()))
         print(f"Pruned history: {before} -> {after} entries "
               f"({archive_after - archive_before} archived)")
+        return
+
+    if args.backfill_transport_failures:
+        report = backfill_transport_failures(apply=args.apply)
+        verb = "Marked" if args.apply else "Would mark"
+        print(f"{verb} {report['matched']} of {report['entries']} entries "
+              f"({report['targets']} targets) as provider failures; "
+              f"{report['unparseable']} unparseable lines kept as-is")
+        if report["backup_path"]:
+            print(f"Backup: {report['backup_path']}")
+        elif not args.apply and report["matched"]:
+            print("Re-run with --apply to write the changes")
         return
 
     if args.list_evaluators:
@@ -2198,12 +2308,7 @@ def main():
             # namespace RegressionEvaluator and find_low_scoring_targets() read.
             append_history(
                 f"proposal:{p.proposal_id}",
-                EvalResult(
-                    score=sum(r.score for r in results) / len(results) if results else 0,
-                    passed=all(r.passed for r in results),
-                    evaluator_name="gate",
-                    feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
-                ),
+                _cli_gate_result(results),
                 content_size=len(json.dumps([getattr(p, 'summary', ''), getattr(p, 'rationale', '')]).encode("utf-8")),
                 kind="proposal",
             )
@@ -2220,12 +2325,7 @@ def main():
             # Also write to history
             append_history(
                 f"tool_calls:{args.session_id}",
-                EvalResult(
-                    score=sum(r.score for r in results) / len(results) if results else 0,
-                    passed=all(r.passed for r in results),
-                    evaluator_name="gate",
-                    feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
-                ),
+                _cli_gate_result(results),
                 content_size=len(json.dumps(["tool_calls"]).encode("utf-8")),
                 kind="tool_calls",
             )
@@ -2242,12 +2342,7 @@ def main():
             # Also write to history
             append_history(
                 f"analyzer_prompt:{args.session_id}",
-                EvalResult(
-                    score=sum(r.score for r in results) / len(results) if results else 0,
-                    passed=all(r.passed for r in results),
-                    evaluator_name="gate",
-                    feedback="; ".join(f"{r.evaluator_name}={'pass' if r.passed else 'fail'}" for r in results),
-                ),
+                _cli_gate_result(results),
                 content_size=len(json.dumps([args.session_id, args.proposal_id]).encode("utf-8")),
                 kind="analyzer_prompt",
             )
