@@ -13,3 +13,7 @@ __pycache__/
 /reports
 /docs
 eval_history.jsonl
+# Session-derived copies of the history: prune_history()'s archive and the
+# backfill's --apply backup stay local-only like the history itself.
+eval_history.archive.jsonl
+eval_history.jsonl.bak-*

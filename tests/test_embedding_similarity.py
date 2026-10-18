@@ -351,8 +351,23 @@ class TestWindowedDrift:
                    return_value=self._backend_by_text(vectors)):
             result = EmbeddingSimilarityEvaluator().evaluate(content, {"baseline": baseline})
 
-        assert result.score < 1.0
         assert result.passed is True  # a small section changed; the skill did not drift
+        reported = float(result.feedback.split("similarity: ")[1].rstrip(")"))
+        assert reported < 1.0  # the change was seen, not truncated away
+
+    def test_passing_drift_scores_full_so_it_cannot_drag_the_regression_mean(self):
+        # Every real change measures below 1.0. Scored raw, a passing drift lowered the
+        # automatic mean and made RegressionEvaluator block judge-improved changes.
+        def vectors(text):
+            return [1.0, 0.0] if "old" in text else [0.93, (1 - 0.93 ** 2) ** 0.5]
+
+        with patch('embedding_similarity.get_embedding_backend',
+                   return_value=self._backend_by_text(vectors)):
+            result = EmbeddingSimilarityEvaluator().evaluate("new body", {"baseline": "old body"})
+
+        assert result.passed is True
+        assert result.score == 1.0
+        assert "0.930" in result.feedback
 
     def test_replacing_most_of_the_body_by_length_is_drift(self):
         keep = "# Skill\n\nShort intro.\n"

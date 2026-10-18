@@ -2458,8 +2458,13 @@ def main():
 # register_evaluator from this module, which are defined by now, so importing it at the
 # bottom is cycle-safe -- and it must happen here rather than only under __main__, or
 # apply_proposal() and skill_quality.py (library imports) never see it. Importing it does
-# not import fastembed: the backend is built on the evaluator's first comparison.
-import embedding_similarity  # noqa: E402,F401
+# not import fastembed: the backend is built on the evaluator's first comparison. Guarded
+# so a broken optional evaluator cannot take down every library import of the gate; the
+# loss stays visible, since enabling it then raises "Unknown evaluator".
+try:
+    import embedding_similarity  # noqa: E402,F401
+except ImportError as e:
+    print(f"warning: embedding_similarity evaluator unavailable: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

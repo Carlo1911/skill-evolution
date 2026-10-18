@@ -237,8 +237,11 @@ class EmbeddingSimilarityEvaluator(Evaluator):
                     feedback=f"Content has drifted too far from baseline (similarity: {similarity:.3f}, threshold: {self.drift_threshold:.3f}). Significant semantic change."
                 )
             
+            # A pass scores 1.0, like a duplicate-check pass: any real change measures
+            # below 1.0, and feeding that into the regression mean would make a passing,
+            # judge-improved change fail regression for being a change at all.
             return EvalResult(
-                score=similarity,
+                score=1.0,
                 passed=True,
                 evaluator_name=self.name,
                 feedback=f"Semantic drift within acceptable range (similarity: {similarity:.3f})"

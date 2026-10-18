@@ -68,6 +68,11 @@ def _normalize(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _new_skill_name(p) -> Optional[str]:
+    """The skill name a create_new proposal would create, if it carries one."""
+    return next((c.new_value for c in p.proposed_changes if c.field == "name" and c.new_value), None)
+
+
 def _incomplete_reasons(p) -> List[str]:
     reasons = []
     _, kind, _ = evaluate._extract_evaluated_content(p)
@@ -121,15 +126,18 @@ def _duplicate_flags(pending, reference, view: _SkillView) -> Dict[str, List[Dic
     """Possible-duplicate flags per pending proposal id, from four text rules."""
     flags: Dict[str, List[Dict[str, str]]] = defaultdict(list)
 
-    same_change = defaultdict(list)
+    # Only content fields identify a change: two new skills sharing a `category` are not
+    # duplicates. A create_new has no target_skill, so it is keyed by the name it creates.
+    same_change = defaultdict(set)
     for p in pending:
+        target = p.target_skill or _new_skill_name(p)
         for c in p.proposed_changes:
-            if c.new_value:
-                same_change[(p.target_skill, c.field, _normalize(c.new_value))].append(p.proposal_id)
+            if c.new_value and c.field in ("body", "description"):
+                same_change[(target, c.field, _normalize(c.new_value))].add(p.proposal_id)
     for ids in same_change.values():
         for pid in ids:
-            for other in ids:
-                if other != pid:
+            for other in sorted(ids - {pid}):
+                if not any(f["other"] == other for f in flags[pid]):
                     flags[pid].append({"other": other, "detail": "identical change to the same target"})
 
     anchors = defaultdict(set)
@@ -148,7 +156,7 @@ def _duplicate_flags(pending, reference, view: _SkillView) -> Dict[str, List[Dic
 
     for p in pending:
         if p.type == ProposalType.CREATE_NEW:
-            name = next((c.new_value for c in p.proposed_changes if c.field == "name" and c.new_value), None)
+            name = _new_skill_name(p)
             if name and name in view.live_by_name:
                 flags[p.proposal_id].append({"other": None, "detail": f"skill '{name}' already exists"})
             continue

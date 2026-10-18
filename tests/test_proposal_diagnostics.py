@@ -289,3 +289,28 @@ def test_works_against_the_claude_code_host(tmp_path, monkeypatch):
     states = {k: v["state"] for k, v in _by_id(directory).items()}
 
     assert states == {"ok": "valid", "old": "archived", "ghost": "unresolved"}
+
+
+def test_create_new_proposals_sharing_only_a_category_are_not_duplicates(queue):
+    for pid, name in (("one", "alpha-skill"), ("two", "beta-skill")):
+        _save(queue, pid, type=ProposalType.CREATE_NEW, target=None, changes=[
+            ProposedChange(field="name", new_value=name),
+            ProposedChange(field="category", new_value="software-development"),
+            ProposedChange(field="body", new_value=REAL_CREATE_BODY.replace("fresh", name)),
+        ])
+
+    diags = _by_id(queue)
+
+    assert diags["one"]["possible_duplicates"] == []
+    assert diags["two"]["possible_duplicates"] == []
+
+
+def test_proposals_sharing_several_changes_are_flagged_once(queue):
+    changes = [ProposedChange(field="body", old_value="Use the old step.", new_value="Use the new step."),
+               ProposedChange(field="description", new_value="same description")]
+    _save(queue, "a", changes=changes)
+    _save(queue, "b", changes=changes)
+
+    flags = _by_id(queue)["a"]["possible_duplicates"]
+
+    assert [f["other"] for f in flags] == ["b"]
