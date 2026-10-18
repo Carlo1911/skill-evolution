@@ -32,7 +32,7 @@ import evaluate
 import host
 import proposal as proposal_module
 import skill_index
-from proposal import ProposalStatus, ProposalType
+from proposal import ProposalType
 
 STATE_PRECEDENCE = ["unreadable", "duplicate_id", "incomplete", "ambiguous", "archived", "unresolved",
                     "stale"]
@@ -198,7 +198,7 @@ def _id_conflicts(loaded, unreadable_files) -> Dict[str, Dict[str, str]]:
 def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -> List[Dict[str, Any]]:
     """Classify the proposals in `directory` (default: proposal.get_proposals_dir()).
 
-    Pending (`status: proposed`) proposals are classified unless `include_all`; the rest
+    Pending (`status: proposed` or `approved`) proposals are classified unless `include_all`; the rest
     still serve as reference for the duplicate rules. Unreadable files are always
     reported, since their status cannot be known.
     """
@@ -228,7 +228,7 @@ def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -
             r["reasons"].append(conflicts[r["file"]])
 
     def classified(p):
-        return include_all or p.status == ProposalStatus.PROPOSED
+        return include_all or p.status in proposal_module.PENDING_STATUSES
 
     pending = [p for _, p in loaded if classified(p)]
     reference = [p for _, p in loaded if not classified(p)]

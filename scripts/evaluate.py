@@ -2368,8 +2368,8 @@ def _select_retroactive_proposals(target: Optional[str] = None, since: Optional[
                                    include_all_statuses: bool = False) -> List[Any]:
     """Load already-saved proposals from disk, optionally filtered by target key and creation date.
 
-    Defaults to `status == proposed` only -- rejected/applied proposals are not live
-    decisions and must not inject scores into the same history stream the live
+    Defaults to pending proposals only (`proposed` or `approved`, proposal.PENDING_STATUSES)
+    -- rejected/applied proposals are not live decisions and must not inject scores into the same history stream the live
     apply_proposal() gate regresses against. Pass `include_all_statuses=True` to opt in.
     """
     import proposal as proposal_module  # local import: breaks the proposal.py <-> evaluate.py cycle
@@ -2377,7 +2377,7 @@ def _select_retroactive_proposals(target: Optional[str] = None, since: Optional[
     proposals = proposal_module.list_proposals(directory=proposals_dir)
 
     if not include_all_statuses:
-        proposals = [p for p in proposals if p.status == proposal_module.ProposalStatus.PROPOSED]
+        proposals = [p for p in proposals if p.status in proposal_module.PENDING_STATUSES]
 
     if target:
         proposals = [p for p in proposals if target_key_for_proposal(p) == target]
@@ -2412,7 +2412,7 @@ def retroactive_reevaluate(target: Optional[str] = None, since: Optional[str] = 
     Appends a fresh combined history entry per proposal target rather than
     mutating or overwriting any existing entry for that target.
 
-    Defaults to `status == proposed` only; `include_all_statuses=True` re-scores
+    Defaults to pending proposals (`proposed` or `approved`); `include_all_statuses=True` re-scores
     rejected/applied proposals too, which injects entries into the same history
     stream the live apply_proposal() gate regresses against -- see
     _select_retroactive_proposals().
@@ -2462,7 +2462,7 @@ def main():
     parser.add_argument("--target", type=str, default=None, help="Filter retroactive re-evaluation to a single target")
     parser.add_argument("--since", type=str, default=None, help="Only re-evaluate proposals created at/after this ISO date")
     parser.add_argument("--all-statuses", action="store_true", help="With --retroactive, re-evaluate proposals regardless of status "
-                                                                     "(default: status == proposed only)")
+                                                                     "(default: pending -- proposed or approved -- only)")
     parser.add_argument("--dry-run", action="store_true", help="With --retroactive, report what would run without appending history")
     parser.add_argument("--prune", action="store_true", help="Prune history per SKILL_EVOLUTION_HISTORY_RETENTION and exit")
     parser.add_argument("--backfill-transport-failures", action="store_true",

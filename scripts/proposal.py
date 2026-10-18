@@ -36,6 +36,12 @@ class ProposalStatus(str, Enum):
     APPLIED = "applied"
 
 
+# Statuses still awaiting an outcome. A human approves by setting `status: approved` (the
+# flow README and SKILL.md document), so apply_proposal() must accept it -- it used to
+# accept only `proposed`, which made that documented flow raise on every host.
+PENDING_STATUSES = (ProposalStatus.PROPOSED, ProposalStatus.APPROVED)
+
+
 def get_proposals_dir() -> str:
     """Return the proposals directory, defaulting to ./proposals/ at the repo root.
 
@@ -503,8 +509,9 @@ def apply_proposal(proposal: SkillEvolutionProposal, min_confidence: float = 0.8
             instructions: list of dicts for the agent (Hermes) or writes (Claude Code)
             evaluation_results: list of evaluator result dicts (present once the gate has run)
     """
-    if proposal.status != ProposalStatus.PROPOSED:
-        raise ValueError(f"Cannot apply: proposal status is {proposal.status.value}, not 'proposed'")
+    if proposal.status not in PENDING_STATUSES:
+        raise ValueError(f"Cannot apply: proposal status is {proposal.status.value}; only "
+                         f"'proposed' or 'approved' proposals can be applied")
 
     if proposal.confidence < min_confidence:
         raise ValueError(f"Confidence {proposal.confidence:.2f} below threshold {min_confidence:.2f}")
