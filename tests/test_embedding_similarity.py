@@ -58,9 +58,13 @@ class TestEmbeddingSimilarityEvaluator:
     
     @pytest.fixture
     def evaluator(self, mock_backend):
-        """Create an evaluator with mock backend."""
+        """Create an evaluator with mock backend.
+
+        The backend is created lazily on first use, so the patch must stay active for
+        the whole test, not just construction.
+        """
         with patch('embedding_similarity.get_embedding_backend', return_value=mock_backend):
-            return EmbeddingSimilarityEvaluator()
+            yield EmbeddingSimilarityEvaluator()
     
     def test_evaluator_registration(self):
         """Test that EmbeddingSimilarityEvaluator is registered."""
@@ -74,13 +78,19 @@ class TestEmbeddingSimilarityEvaluator:
         """Test that embedding_similarity is not in default evaluators."""
         assert "embedding_similarity" not in evaluate.DEFAULT_EVALUATORS
     
-    def test_no_context_returns_pass(self, evaluator):
-        """Test that evaluator passes when no context is provided."""
+    def test_no_context_is_not_applicable(self, evaluator, mock_backend):
+        """No comparison context means nothing was compared: abstain, never a silent pass."""
         result = evaluator.evaluate("test content", context=None)
-        
-        assert result.passed is True
-        assert result.score == 1.0
-        assert "No embedding context" in result.feedback
+
+        assert result.not_applicable is True
+        assert "not applicable" in result.feedback
+        mock_backend.embed.assert_not_called()
+
+    def test_construction_does_not_build_the_backend(self):
+        """get_enabled_evaluators() instantiates per call; that must not load a model."""
+        with patch('embedding_similarity.get_embedding_backend') as factory:
+            EmbeddingSimilarityEvaluator()
+        factory.assert_not_called()
     
     def test_duplicate_detection_pass(self, evaluator, mock_backend):
         """Test duplicate detection passes when similarity is below threshold."""
@@ -93,11 +103,11 @@ class TestEmbeddingSimilarityEvaluator:
         
         result = evaluator.evaluate(
             "new content",
-            context={"existing_skills": ["skill1", "skill2"]}
+            context={"existing_skills": [("skill1", "body 1"), ("skill2", "body 2")]}
         )
         
         assert result.passed is True
-        assert result.score < 0.85  # Below duplicate threshold
+        assert result.score == 1.0  # a passing duplicate check never drags the mean down
     
     def test_duplicate_detection_fail(self, evaluator, mock_backend):
         """Test duplicate detection fails when similarity is above threshold."""
@@ -110,12 +120,13 @@ class TestEmbeddingSimilarityEvaluator:
         
         result = evaluator.evaluate(
             "duplicate content",
-            context={"existing_skills": ["similar skill", "different skill"]}
+            context={"existing_skills": [("similar-skill", "body"), ("different-skill", "body")]}
         )
         
         assert result.passed is False
-        assert result.score > 0.85  # Above duplicate threshold
+        assert result.score < 0.15  # 1 - similarity: higher is better, like every evaluator
         assert "too similar" in result.feedback.lower()
+        assert "similar-skill" in result.feedback
     
     def test_drift_detection_pass(self, evaluator, mock_backend):
         """Test drift detection passes when similarity is above threshold."""
@@ -194,9 +205,7 @@ class TestEmbeddingSimilarityEvaluator:
             context={"existing_skills": []}
         )
         
-        assert result.passed is True
-        assert result.score == 1.0
-        assert "No existing skills" in result.feedback
+        assert result.not_applicable is True
     
     def test_empty_sessions(self, evaluator):
         """Test grounding check with no sessions."""
@@ -205,9 +214,7 @@ class TestEmbeddingSimilarityEvaluator:
             context={"sessions": []}
         )
         
-        assert result.passed is True
-        assert result.score == 1.0
-        assert "No sessions" in result.feedback
+        assert result.not_applicable is True
     
     def test_embedding_error_handling(self, evaluator, mock_backend):
         """Test that embedding errors are handled gracefully."""
@@ -248,7 +255,7 @@ class TestEmbeddingSimilarityEvaluator:
         result = evaluator.evaluate(
             "content",
             context={
-                "existing_skills": ["skill1"],
+                "existing_skills": [("skill1", "body")],
                 "baseline": "baseline"
             }
         )
@@ -274,3 +281,121 @@ class TestEmbeddingSimilarityEvaluator:
         
         # Should run drift detection (checks baseline)
         assert "drift" in result.feedback.lower() or "similarity" in result.feedback.lower()
+
+
+class TestDuplicateScoring:
+    """Duplicate scores follow the higher-is-better convention (KTD2)."""
+
+    @pytest.fixture
+    def evaluator(self):
+        backend = Mock()
+        with patch('embedding_similarity.get_embedding_backend', return_value=backend):
+            yield EmbeddingSimilarityEvaluator(), backend
+
+    @staticmethod
+    def _vec(similarity):
+        # Unit vector at the given cosine similarity to [1, 0].
+        return [similarity, (1 - similarity ** 2) ** 0.5]
+
+    def test_near_duplicate_fails_with_inverted_score_and_names_the_skill(self, evaluator):
+        ev, backend = evaluator
+        backend.embed.side_effect = [[[1.0, 0.0]], [self._vec(0.95), self._vec(0.2)]]
+
+        result = ev.evaluate("new", {"existing_skills": [("deploy-helper", "a"), ("other", "b")]})
+
+        assert result.passed is False
+        assert result.score == pytest.approx(0.05)
+        assert "deploy-helper" in result.feedback
+
+    def test_original_skill_passes_with_full_score_and_reports_its_neighbour(self, evaluator):
+        ev, backend = evaluator
+        backend.embed.side_effect = [[[1.0, 0.0]], [self._vec(0.80)]]
+
+        result = ev.evaluate("new", {"existing_skills": [("closest-skill", "a")]})
+
+        assert result.passed is True
+        assert result.score == 1.0
+        assert "0.800" in result.feedback
+        assert "closest-skill" in result.feedback
+
+
+class TestWindowedDrift:
+    """Drift compares windows that fit the model instead of whole bodies (KTD10).
+
+    The default model truncates at 512 tokens, so two whole-body embeddings that differ
+    only past the first ~2 KB come out identical.
+    """
+
+    @staticmethod
+    def _backend_by_text(vectors):
+        """A backend embedding each window by looking its text up in `vectors`."""
+        backend = Mock()
+        backend.embed.side_effect = lambda texts: [vectors(t) for t in texts]
+        return backend
+
+    def test_only_the_changed_section_lowers_the_similarity(self):
+        # The change sits past the first 2 KB; the fake backend, like the real model,
+        # only "sees" the start of each text it embeds.
+        intro = "# Skill\n\n" + "Intro sentence. " * 80 + "\n"
+        steps = "## Steps\n\n" + "Do the thing. " * 80 + "\n"
+        old_tail = "## Pitfalls\n\nWatch out for X.\n"
+        new_tail = "## Pitfalls\n\nSomething unrelated.\n"
+        baseline, content = intro + steps + old_tail, intro + steps + new_tail
+        assert len(intro + steps) > 2000
+
+        def vectors(text):
+            return [0.0, 1.0] if "unrelated" in text[:2000] else [1.0, 0.0]
+
+        with patch('embedding_similarity.get_embedding_backend',
+                   return_value=self._backend_by_text(vectors)):
+            result = EmbeddingSimilarityEvaluator().evaluate(content, {"baseline": baseline})
+
+        assert result.passed is False
+        assert result.score == pytest.approx(0.0)
+
+    def test_long_section_is_split_and_no_window_exceeds_the_limit(self):
+        import embedding_similarity
+        long_body = "# Skill\n\n" + "\n".join(f"line {i} " + "x" * 60 for i in range(200))
+        seen = []
+
+        def vectors(text):
+            seen.append(text)
+            return [1.0, 0.0]
+
+        with patch('embedding_similarity.get_embedding_backend',
+                   return_value=self._backend_by_text(vectors)):
+            EmbeddingSimilarityEvaluator().evaluate(long_body + "\nnew line\n", {"baseline": long_body})
+
+        assert len(seen) > 2
+        assert max(len(t) for t in seen) <= embedding_similarity.DRIFT_WINDOW_CHARS
+
+    def test_identical_content_is_not_applicable_and_embeds_nothing(self):
+        backend = Mock()
+        with patch('embedding_similarity.get_embedding_backend', return_value=backend):
+            result = EmbeddingSimilarityEvaluator().evaluate("same body", {"baseline": "same body"})
+
+        assert result.not_applicable is True
+        backend.embed.assert_not_called()
+
+
+class TestFailClosed:
+    def test_missing_fastembed_fails_closed_inside_run_evaluators(self, monkeypatch):
+        def no_fastembed():
+            raise ImportError("fastembed not installed")
+
+        monkeypatch.setattr(evaluate, "REGISTRY", {"embedding_similarity": EmbeddingSimilarityEvaluator})
+        monkeypatch.setenv("SKILL_EVOLUTION_EVALUATORS", "embedding_similarity")
+        with patch('embedding_similarity.get_embedding_backend', side_effect=no_fastembed):
+            (result,) = evaluate.run_evaluators("body", "skill:x", {"baseline": "old body"})
+
+        assert result.passed is False
+        assert result.not_applicable is False
+        assert "fastembed" in result.feedback
+
+    def test_non_numeric_threshold_falls_back_like_other_numeric_settings(self, monkeypatch, capsys):
+        monkeypatch.setenv("SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD", "high")
+
+        ev = EmbeddingSimilarityEvaluator()
+
+        assert ev.duplicate_threshold == 0.85
+        assert "SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD" in capsys.readouterr().err

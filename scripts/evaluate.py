@@ -2403,13 +2403,13 @@ def main():
             print(f"{summary['target']}: score={summary['score']:.2f} passed={summary['passed']}")
 
 
+# embedding_similarity registers itself on import. It imports Evaluator/EvalResult/
+# register_evaluator from this module, which are defined by now, so importing it at the
+# bottom is cycle-safe -- and it must happen here rather than only under __main__, or
+# apply_proposal() and skill_quality.py (library imports) never see it. Importing it does
+# not import fastembed: the backend is built on the evaluator's first comparison.
+import embedding_similarity  # noqa: E402,F401
+
+
 if __name__ == "__main__":
-    # Import embedding_similarity to register the evaluator
-    # This is done here to avoid circular imports at module load time
-    try:
-        import embedding_similarity
-    except ImportError:
-        # fastembed not installed, embedding_similarity evaluator not available
-        pass
-    
     main()

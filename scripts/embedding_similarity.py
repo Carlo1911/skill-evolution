@@ -18,14 +18,53 @@ Usage:
     - If context contains "existing_skills": runs duplicate_detection
     - If context contains "baseline": runs drift_detection
     - If context contains "sessions": runs grounding_check
+    With none of them (or an empty one) it abstains as "not applicable" rather than
+    reporting a pass it never measured.
 """
 
-import os
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from evaluate import Evaluator, EvalResult, register_evaluator
+from fetch_sessions import env_float
 
 from embedding_backends import EmbeddingBackend, get_embedding_backend
+
+
+# The default model (BAAI/bge-small-en-v1.5) truncates every input at 512 tokens, about
+# 2 KB of English, while installed skills run to ~9 KB at the median. Whole-body drift
+# embeddings therefore compare only each body's opening and come out identical for most
+# real changes. Drift compares windows that fit instead, with headroom under the limit.
+DRIFT_WINDOW_CHARS = 1500
+
+_HEADING = re.compile(r"^#{1,6} ", re.MULTILINE)
+
+
+def _windows(text: str, limit: int = DRIFT_WINDOW_CHARS) -> List[str]:
+    """Split `text` at markdown headings, then any section over `limit` at line breaks
+    (or hard, for a single line longer than `limit`)."""
+    starts = [m.start() for m in _HEADING.finditer(text)]
+    if not starts or starts[0] != 0:
+        starts.insert(0, 0)
+    sections = [text[a:b] for a, b in zip(starts, starts[1:] + [len(text)])]
+
+    windows: List[str] = []
+    for section in sections:
+        current = ""
+        for line in section.splitlines(keepends=True):
+            while len(line) > limit:
+                if current:
+                    windows.append(current)
+                    current = ""
+                windows.append(line[:limit])
+                line = line[limit:]
+            if len(current) + len(line) > limit:
+                windows.append(current)
+                current = ""
+            current += line
+        if current.strip():
+            windows.append(current)
+    return [w for w in windows if w.strip()] or [text[:limit]]
 
 
 def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
@@ -62,21 +101,24 @@ class EmbeddingSimilarityEvaluator(Evaluator):
     name = "embedding_similarity"
     
     def __init__(self):
-        """Initialize the evaluator with configured backend and thresholds."""
-        self.backend: EmbeddingBackend = get_embedding_backend()
-        
-        self.duplicate_threshold = float(os.getenv(
-            "SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD",
-            "0.85"
-        ))
-        self.drift_threshold = float(os.getenv(
-            "SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD",
-            "0.70"
-        ))
-        self.grounding_threshold = float(os.getenv(
-            "SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD",
-            "0.60"
-        ))
+        """Read thresholds; the backend is built on first use, not here.
+
+        evaluate.get_enabled_evaluators() instantiates evaluators on every
+        run_evaluators() call, so building the backend here would load the model for
+        every target of every proposal -- and a missing fastembed would raise outside
+        the per-evaluator fail-closed wrapper instead of failing this evaluator.
+        """
+        self._backend: Optional[EmbeddingBackend] = None
+
+        self.duplicate_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD", 0.85)
+        self.drift_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD", 0.70)
+        self.grounding_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD", 0.60)
+
+    @property
+    def backend(self) -> EmbeddingBackend:
+        if self._backend is None:
+            self._backend = get_embedding_backend()
+        return self._backend
     
     def evaluate(self, content: str, context: Optional[Dict[str, Any]] = None) -> EvalResult:
         """Evaluate content using embedding similarity.
@@ -84,7 +126,7 @@ class EmbeddingSimilarityEvaluator(Evaluator):
         Args:
             content: The content to evaluate (skill body, proposal, etc.)
             context: Optional context dict containing:
-                - existing_skills: List of existing skill bodies for duplicate detection
+                - existing_skills: (name, body) pairs of installed skills for duplicate detection
                 - baseline: Baseline skill body for drift detection
                 - sessions: List of session texts for grounding check
         
@@ -102,58 +144,53 @@ class EmbeddingSimilarityEvaluator(Evaluator):
         elif "sessions" in context:
             return self._check_grounding(content, context["sessions"])
         else:
-            # No context provided, skip evaluation
-            return EvalResult(
-                score=1.0,
-                passed=True,
-                evaluator_name=self.name,
-                feedback="No embedding context provided, skipping similarity check"
-            )
+            return self._not_applicable("no existing skills, baseline or sessions to compare against")
     
-    def _check_duplicates(self, content: str, existing_skills: List[str]) -> EvalResult:
+    def _check_duplicates(self, content: str, existing_skills: List[Tuple[str, str]]) -> EvalResult:
         """Check if content is too similar to existing skills (duplicate detection).
-        
+
+        Each body is embedded whole, so the model sees its opening (frontmatter and
+        introduction) -- the part that best tells one skill from another.
+
         Args:
             content: New content to check
-            existing_skills: List of existing skill bodies
-            
+            existing_skills: (name, body) pairs of installed skills
+
         Returns:
-            EvalResult with similarity score and feedback
+            EvalResult scored higher-is-better: 1.0 when it passes, 1 - similarity when
+            it blocks. The raw similarity and the closest skill go in the feedback.
         """
         if not existing_skills:
-            return EvalResult(
-                score=1.0,
-                passed=True,
-                evaluator_name=self.name,
-                feedback="No existing skills to compare against"
-            )
+            return self._not_applicable("no installed skills to compare against")
         
         try:
-            # Generate embeddings
+            names = [name for name, _ in existing_skills]
             content_embedding = self.backend.embed([content])[0]
-            existing_embeddings = self.backend.embed(existing_skills)
+            existing_embeddings = self.backend.embed([body for _, body in existing_skills])
             
-            # Calculate similarities
             similarities = [
                 cosine_similarity(content_embedding, existing_emb)
                 for existing_emb in existing_embeddings
             ]
-            
-            max_similarity = max(similarities)
-            
+            closest = max(range(len(similarities)), key=similarities.__getitem__)
+            max_similarity = similarities[closest]
+
+            # Between distinct installed skills the nearest-neighbour similarity already
+            # runs ~0.67-0.97 with the default model, so scoring a pass as 1 - similarity
+            # would record every original skill at 0.03-0.33 and drag gate means down.
             if max_similarity > self.duplicate_threshold:
                 return EvalResult(
-                    score=max_similarity,
+                    score=1.0 - max_similarity,
                     passed=False,
                     evaluator_name=self.name,
-                    feedback=f"Content is too similar to existing skill (similarity: {max_similarity:.3f}, threshold: {self.duplicate_threshold:.3f}). Possible duplicate."
+                    feedback=f"Content is too similar to existing skill '{names[closest]}' (similarity: {max_similarity:.3f}, threshold: {self.duplicate_threshold:.3f}). Possible duplicate."
                 )
             
             return EvalResult(
-                score=max_similarity,
+                score=1.0,
                 passed=True,
                 evaluator_name=self.name,
-                feedback=f"No duplicate detected (max similarity: {max_similarity:.3f})"
+                feedback=f"No duplicate detected (closest: '{names[closest]}', similarity: {max_similarity:.3f})"
             )
             
         except Exception as e:
@@ -161,7 +198,11 @@ class EmbeddingSimilarityEvaluator(Evaluator):
     
     def _check_drift(self, content: str, baseline: str) -> EvalResult:
         """Check if content has drifted too far from baseline (drift detection).
-        
+
+        Both texts are split into windows that fit the model (see DRIFT_WINDOW_CHARS).
+        Each content window is matched to its most similar baseline window, and the
+        drift similarity is the lowest of those matches -- the window that changed most.
+
         Args:
             content: New content to check
             baseline: Original/baseline content
@@ -169,13 +210,16 @@ class EmbeddingSimilarityEvaluator(Evaluator):
         Returns:
             EvalResult with similarity score and feedback
         """
+        if content == baseline:
+            return self._not_applicable("content is identical to the baseline; nothing changed")
         try:
-            # Generate embeddings
-            content_embedding = self.backend.embed([content])[0]
-            baseline_embedding = self.backend.embed([baseline])[0]
-            
-            # Calculate similarity
-            similarity = cosine_similarity(content_embedding, baseline_embedding)
+            content_embeddings = self.backend.embed(_windows(content))
+            baseline_embeddings = self.backend.embed(_windows(baseline))
+
+            similarity = min(
+                max(cosine_similarity(c, b) for b in baseline_embeddings)
+                for c in content_embeddings
+            )
             
             if similarity < self.drift_threshold:
                 return EvalResult(
@@ -206,12 +250,7 @@ class EmbeddingSimilarityEvaluator(Evaluator):
             EvalResult with average similarity score and feedback
         """
         if not sessions:
-            return EvalResult(
-                score=1.0,
-                passed=True,
-                evaluator_name=self.name,
-                feedback="No sessions provided for grounding check"
-            )
+            return self._not_applicable("no sessions to check grounding against")
         
         try:
             # Generate embeddings
