@@ -9,6 +9,7 @@ Usage:
     python3 scripts/evaluate.py --list-evaluators
 """
 
+import contextvars
 import hashlib
 import json
 import math
@@ -58,6 +59,11 @@ class EvalResult:
     # that tries and errors still fails closed. score/passed mirror "no evaluator" (1.0,
     # pass) so a reader that ignores the flag sees what an absent evaluator would give.
     not_applicable: bool = False
+    # Who judged: {"provider", "model", "rubric_version"} for an llm_judge result whose
+    # provider answered, else None. Carried onto the combined gate entry by
+    # judge_provenance(), so a history reader can tell a change in the skill from a change
+    # in the judge -- the provider chain may answer with a different model on any call.
+    judge: Optional[Dict[str, str]] = None
 
 
 def applicable(results: List["EvalResult"]) -> List["EvalResult"]:
@@ -69,6 +75,16 @@ def mean_score(results: List["EvalResult"], default: float) -> float:
     """Mean score over the applicable results; `default` when none count."""
     scored = applicable(results)
     return sum(r.score for r in scored) / len(scored) if scored else default
+
+
+def judge_provenance(results: List["EvalResult"]) -> Optional[Dict[str, str]]:
+    """The `judge` of the first result that carries one, or None.
+
+    Every path that combines results into a history entry passes this on, for the same
+    reason each one carries any_transport_failure(): a path that forgets it writes entries
+    a reader cannot attribute.
+    """
+    return next((r.judge for r in results if getattr(r, "judge", None)), None)
 
 
 def any_transport_failure(results: List["EvalResult"]) -> bool:
@@ -285,6 +301,8 @@ def append_history(target: str, result: EvalResult, session_ids: Optional[List[s
         entry.pop("transport_failure", None)
     if not entry.get("not_applicable"):
         entry.pop("not_applicable", None)
+    if not entry.get("judge"):
+        entry.pop("judge", None)
 
     with open(history_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -774,9 +792,34 @@ def _post_json(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout:
             raise ProviderError(f"{provider_label} provider call failed: {e}") from e
 
 
+def provider_model(name: str) -> str:
+    """The model id provider `name` is configured to call, resolved at call time.
+
+    The single source for every caller below and for the provenance call_provider()
+    records, so a history entry names the model that was actually asked. Empty for an
+    unknown provider or an LM Studio model left unset (whose caller fails closed).
+    """
+    env = os.environ.get
+    if name == "claude":
+        return env("SKILL_EVOLUTION_CLAUDE_MODEL", "claude-sonnet-5")
+    if name == "ollama":
+        return env("SKILL_EVOLUTION_OLLAMA_MODEL", "llama3")
+    if name == "lmstudio":
+        return env("SKILL_EVOLUTION_LMSTUDIO_MODEL", "").strip()
+    if name in ("opencode", "opencode_zen"):
+        return env(OPENCODE_ZEN_MODEL_ENV_VAR, env(OPENCODE_MODEL_ENV_VAR, DEFAULT_OPENCODE_ZEN_MODEL))
+    if name == "opencode_go":
+        return env(OPENCODE_GO_MODEL_ENV_VAR, DEFAULT_OPENCODE_GO_MODEL)
+    if name == "openai":
+        return env("SKILL_EVOLUTION_OPENAI_MODEL", "gpt-4o")
+    if name == "gemini":
+        return env("SKILL_EVOLUTION_GEMINI_MODEL", "gemini-2.0-flash")
+    return ""
+
+
 def _call_claude(prompt: str, timeout: int = 60) -> str:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    model = os.environ.get("SKILL_EVOLUTION_CLAUDE_MODEL", "claude-sonnet-5")
+    model = provider_model("claude")
     payload = _post_json(
         "https://api.anthropic.com/v1/messages",
         {"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": prompt}]},
@@ -811,14 +854,14 @@ def _call_openai_compatible(prompt: str, base_url: str, model: str, headers: Dic
 
 def _call_ollama(prompt: str, timeout: int = 60) -> str:
     base_url = os.environ.get("SKILL_EVOLUTION_OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    model = os.environ.get("SKILL_EVOLUTION_OLLAMA_MODEL", "llama3")
+    model = provider_model("ollama")
     return _call_openai_compatible(prompt, base_url, model, {}, "Ollama/llama.cpp", timeout)
 
 
 def _call_lmstudio(prompt: str, timeout: int = 60) -> str:
     """Call a configured LM Studio model through its local OpenAI-compatible API."""
     base_url = os.environ.get("SKILL_EVOLUTION_LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
-    model = os.environ.get("SKILL_EVOLUTION_LMSTUDIO_MODEL", "").strip()
+    model = provider_model("lmstudio")
     if not model:
         raise ProviderError(
             "LM Studio provider selected but SKILL_EVOLUTION_LMSTUDIO_MODEL is not set. "
@@ -872,10 +915,7 @@ def _call_opencode_zen(prompt: str, timeout: int = 60) -> str:
         OPENCODE_ZEN_BASE_URL_ENV_VAR,
         os.environ.get(OPENCODE_BASE_URL_ENV_VAR, DEFAULT_OPENCODE_ZEN_BASE_URL),
     )
-    model = os.environ.get(
-        OPENCODE_ZEN_MODEL_ENV_VAR,
-        os.environ.get(OPENCODE_MODEL_ENV_VAR, DEFAULT_OPENCODE_ZEN_MODEL),
-    )
+    model = provider_model("opencode_zen")
     return _call_opencode_tier(prompt, base_url, model, "OpenCode Zen", timeout)
 
 
@@ -889,7 +929,7 @@ def _call_opencode_go(prompt: str, timeout: int = 60) -> str:
     Zen-pointed generic override can never silently redirect the Go tier.
     """
     base_url = os.environ.get(OPENCODE_GO_BASE_URL_ENV_VAR, DEFAULT_OPENCODE_GO_BASE_URL)
-    model = os.environ.get(OPENCODE_GO_MODEL_ENV_VAR, DEFAULT_OPENCODE_GO_MODEL)
+    model = provider_model("opencode_go")
     return _call_opencode_tier(prompt, base_url, model, "OpenCode Go", timeout)
 
 
@@ -923,7 +963,7 @@ def _call_openai(prompt: str, timeout: int = 60) -> str:
             "Export it (do not commit it) before running evaluators against OpenAI."
         )
     base_url = os.environ.get("SKILL_EVOLUTION_OPENAI_BASE_URL", "https://api.openai.com/v1")
-    model = os.environ.get("SKILL_EVOLUTION_OPENAI_MODEL", "gpt-4o")
+    model = provider_model("openai")
     return _call_openai_compatible(
         prompt, base_url, model, {"authorization": f"Bearer {api_key}"}, "OpenAI", timeout,
     )
@@ -944,7 +984,7 @@ def _call_gemini(prompt: str, timeout: int = 60) -> str:
         )
     base_url = os.environ.get("SKILL_EVOLUTION_GEMINI_BASE_URL",
                                "https://generativelanguage.googleapis.com")
-    model = os.environ.get("SKILL_EVOLUTION_GEMINI_MODEL", "gemini-2.0-flash")
+    model = provider_model("gemini")
     payload = _post_json(
         f"{base_url.rstrip('/')}/v1beta/models/{model}:generateContent",
         {"contents": [{"parts": [{"text": prompt}]}]},
@@ -967,6 +1007,20 @@ PROVIDER_CALLERS = {
     "openai": _call_openai,
     "gemini": _call_gemini,
 }
+
+
+class ProviderReply(NamedTuple):
+    """Which provider in the chain answered, and the model it was configured to call."""
+    provider: str
+    model: str
+
+
+# Set by call_provider() on every successful answer. call_provider() keeps returning plain
+# text -- the test suite stubs it with fixed signatures in two dozen places -- so a caller
+# that needs provenance resets this, calls, and reads it back (see LLMJudgeEvaluator). A
+# stubbed call leaves it None, which reads as "provenance unknown".
+_LAST_PROVIDER_REPLY: "contextvars.ContextVar[Optional[ProviderReply]]" = contextvars.ContextVar(
+    "skill_evolution_last_provider_reply", default=None)
 
 PROVIDER_TIMEOUT_ENV_VAR = "SKILL_EVOLUTION_PROVIDER_TIMEOUT"
 DEFAULT_PROVIDER_TIMEOUT = 60
@@ -1043,7 +1097,7 @@ def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: O
     for name in chain:
         caller = PROVIDER_CALLERS[name]
         try:
-            return caller(safe_prompt, timeout=resolved_timeout)
+            text = caller(safe_prompt, timeout=resolved_timeout)
         except Exception as e:
             msg = f"{name}: {e}"
             failures.append((name, msg))
@@ -1052,6 +1106,8 @@ def call_provider(prompt: str, provider: Optional[str] = None, evaluator_name: O
             # caller exhausted).  Only keep going while there are providers
             # left in the chain.
             continue
+        _LAST_PROVIDER_REPLY.set(ProviderReply(name, provider_model(name)))
+        return text
 
     # Every provider failed.
     raise ProviderError(
@@ -1256,6 +1312,12 @@ def wrap_untrusted_block(boundary: str, content: str) -> str:
     return f"{boundary}\n{content}\n{boundary}"
 
 
+# Bump whenever _build_prompt()'s wording or the rubric changes: scores from different
+# rubric versions are not comparable, and history records which one produced each score.
+# tests/test_judge_provenance.py pins the prompt's hash and fails until this is bumped.
+JUDGE_RUBRIC_VERSION = "2026-10-18.1"
+
+
 class LLMJudgeEvaluator(Evaluator):
     """Rubric-based multi-dimensional LLM judge. Fails closed on bad output."""
 
@@ -1265,8 +1327,11 @@ class LLMJudgeEvaluator(Evaluator):
 
     def evaluate(self, content: str, context: Optional[Dict[str, Any]] = None) -> EvalResult:
         prompt = self._build_prompt(content)
+        _LAST_PROVIDER_REPLY.set(None)
+        judge = None
         try:
             raw_response = call_provider(prompt, evaluator_name=self.name)
+            judge = self._judge_from_reply()
             avg_score, parsed = self.parse_and_score(raw_response)
         except ProviderError as e:
             # A provider fault (rate limit, outage, timeout) is not a quality judgment on
@@ -1276,13 +1341,25 @@ class LLMJudgeEvaluator(Evaluator):
         except ValueError as e:
             # Malformed/out-of-range judge output is a content-caused failure: the provider
             # answered, but with garbage. Not tagged as transport.
-            return self._fail(f"llm_judge failed closed: {e}")
+            failed = self._fail(f"llm_judge failed closed: {e}")
+            failed.judge = judge
+            return failed
 
         threshold = env_float(LLM_JUDGE_THRESHOLD_ENV_VAR, DEFAULT_LLM_JUDGE_THRESHOLD)
         return EvalResult(
             score=avg_score, passed=avg_score >= threshold, evaluator_name=self.name,
-            feedback=parsed.get("feedback", ""),
+            feedback=parsed.get("feedback", ""), judge=judge,
         )
+
+    @staticmethod
+    def _judge_from_reply() -> Optional[Dict[str, str]]:
+        """Provenance of the answer call_provider() just returned; None when the call was
+        stubbed and set nothing."""
+        reply = _LAST_PROVIDER_REPLY.get()
+        if reply is None:
+            return None
+        return {"provider": reply.provider, "model": reply.model,
+                "rubric_version": JUDGE_RUBRIC_VERSION}
 
     def parse_and_score(self, raw: str) -> Tuple[float, Dict[str, Any]]:
         """Validate a raw judge response and average its rubric keys into one score.
@@ -1410,8 +1487,23 @@ class RegressionEvaluator(Evaluator):
         status = "no regression" if passed else "regression detected"
         return EvalResult(
             score=float(new_score), passed=passed, evaluator_name=self.name,
-            feedback=f"new score {new_score} vs previous {previous_score} ({status})",
+            feedback=f"new score {new_score} vs previous {previous_score} ({status})"
+                     + self._judge_mismatch(previous_entry.get("judge"), context.get("judge")),
         )
+
+    @staticmethod
+    def _judge_mismatch(baseline: Optional[Dict[str, str]], current: Optional[Dict[str, str]]) -> str:
+        """A note when the baseline and this run were scored by different models or rubric
+        versions. Informational only: the comparison and its verdict are unchanged."""
+        if not baseline or not current:
+            return ""
+        keys = ("provider", "model", "rubric_version")
+        if all(baseline.get(k) == current.get(k) for k in keys):
+            return ""
+
+        def describe(j):
+            return f"{j.get('provider')}/{j.get('model')} rubric {j.get('rubric_version')}"
+        return f" (baseline judged by {describe(baseline)}; this run {describe(current)})"
 
 
 register_evaluator("regression", RegressionEvaluator)
@@ -1601,6 +1693,9 @@ def run_evaluators(content: str, target: str, context: Optional[Dict[str, Any]] 
         aggregate_score = mean_score(results, default=0.0)
         post_context = dict(base_context)
         post_context["new_score"] = aggregate_score
+        judge = judge_provenance(results)
+        if judge:
+            post_context["judge"] = judge
         results.extend(_run_one(e, content, post_context) for e in regression_evaluators)
 
         review_context = dict(post_context)
@@ -2403,6 +2498,7 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         feedback_parts.append(feedback)
         combined = EvalResult(
             score=score, passed=target_passed, evaluator_name="gate", feedback=feedback,
+            judge=judge_provenance(results),
         )
         append_history(target, combined, session_ids=resolved_session_ids, kind=kind or label,
                        content_size=content_size, baseline_size=baseline_size,
@@ -2561,6 +2657,7 @@ def _cli_gate_result(results: List[EvalResult]) -> EvalResult:
         evaluator_name="gate",
         feedback="; ".join(f"{r.evaluator_name}={_verdict(r)}" for r in results),
         transport_failure=any_transport_failure(results),
+        judge=judge_provenance(results),
     )
 
 

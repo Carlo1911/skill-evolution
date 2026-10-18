@@ -166,6 +166,7 @@ def evaluate_skill_quality(skill_name: str) -> Optional[SkillQualityResult]:
             passed=passed,
             evaluator_name="gate",
             transport_failure=evaluate.any_transport_failure(results),
+            judge=evaluate.judge_provenance(results),
         )
         
         # Append to history
