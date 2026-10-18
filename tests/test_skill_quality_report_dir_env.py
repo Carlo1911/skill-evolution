@@ -83,7 +83,6 @@ def test_wrapper_default_report_dir_is_repo_reports(tmp_path, monkeypatch):
 while [ $# -gt 0 ]; do
   if [ "$1" = "--output" ]; then
     echo "$2" > {captured_output}
-    touch "$2"
   fi
   shift
 done
@@ -91,9 +90,12 @@ exit 0
 """)
     stub.chmod(0o755)
 
+    # The stub only records the path: creating it would write an empty report into the
+    # real <repo>/reports/ on every run. The env var is dropped from the child's copy of
+    # the environment itself -- delenv after os.environ.copy() did not reach the child.
     env = os.environ.copy()
     env["PATH"] = str(bin_dir) + ":" + env.get("PATH", "")
-    monkeypatch.delenv("SKILL_EVOLUTION_QUALITY_REPORT_DIR", raising=False)
+    env.pop("SKILL_EVOLUTION_QUALITY_REPORT_DIR", None)
 
     result = subprocess.run(
         [WRAPPER],
