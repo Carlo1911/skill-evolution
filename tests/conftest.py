@@ -4,7 +4,7 @@ Two fixtures, both autouse:
 
 - `_hermetic_env` (per test) drops every SKILL_EVOLUTION_* variable inherited from the
   shell and points each runtime path the pipeline resolves at call time -- history,
-  proposals, reports, session DB, Claude Code home -- at a per-test temp dir. The
+  proposals, reports, labels, session DB, Claude Code home -- at a per-test temp dir. The
   processed-session state file is redirected through the `STATE_FILE` module globals of
   state.py and fetch_sessions.py instead of its env var: that is how the state tests
   already redirect it, and the env var would override their own patches. The
@@ -48,6 +48,7 @@ if _REAL_CLAUDE_CONFIG_DIR:
 WATCHED_DIRS = [
     os.path.join(REPO_ROOT, "proposals"),
     os.path.join(REPO_ROOT, "reports"),
+    os.path.join(REPO_ROOT, "labels"),
     os.path.join(_REAL_HOME, ".hermes", "skills"),
     os.path.join(_REAL_HOME, ".claude", "skills"),
 ]
@@ -105,5 +106,6 @@ def _hermetic_env(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("SKILL_EVOLUTION_HISTORY_PATH", str(base / "eval_history.jsonl"))
     monkeypatch.setenv("SKILL_EVOLUTION_PROPOSALS_DIR", str(base / "proposals"))
     monkeypatch.setenv("SKILL_EVOLUTION_QUALITY_REPORT_DIR", str(base / "reports"))
+    monkeypatch.setenv("SKILL_EVOLUTION_LABELS_PATH", str(base / "labels" / "review_labels.jsonl"))
     monkeypatch.setenv("SKILL_EVOLUTION_DB_PATH", str(base / "state.db"))
     monkeypatch.setenv("SKILL_EVOLUTION_CLAUDE_CODE_HOME", str(base / "claude"))

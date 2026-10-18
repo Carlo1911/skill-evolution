@@ -11,6 +11,7 @@ __pycache__/
 
 /proposals
 /reports
+/labels
 /docs
 eval_history.jsonl
 # Session-derived copies of the history: prune_history()'s archive and the

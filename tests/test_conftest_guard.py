@@ -60,6 +60,7 @@ def test_guard_watches_the_real_state_files_and_trees():
     assert os.path.join(home, ".hermes", "skill_evolution_state.json") in conftest.WATCHED_FILES
     assert os.path.join(home, ".hermes", "skills") in conftest.WATCHED_DIRS
     assert os.path.join(conftest.REPO_ROOT, "reports") in conftest.WATCHED_DIRS
+    assert os.path.join(conftest.REPO_ROOT, "labels") in conftest.WATCHED_DIRS
 
 
 def test_every_host_resolves_state_away_from_the_real_home():
@@ -75,6 +76,6 @@ def test_shell_configuration_does_not_leak_into_tests():
     leaked = [k for k in os.environ if k.startswith("SKILL_EVOLUTION_")
               and k not in {"SKILL_EVOLUTION_HISTORY_PATH", "SKILL_EVOLUTION_PROPOSALS_DIR",
                             "SKILL_EVOLUTION_QUALITY_REPORT_DIR", "SKILL_EVOLUTION_DB_PATH",
-                            "SKILL_EVOLUTION_CLAUDE_CODE_HOME"}]
+                            "SKILL_EVOLUTION_CLAUDE_CODE_HOME", "SKILL_EVOLUTION_LABELS_PATH"}]
     assert leaked == []
     assert "CLAUDE_CONFIG_DIR" not in os.environ
