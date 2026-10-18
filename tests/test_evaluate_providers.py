@@ -191,8 +191,8 @@ def test_unknown_provider_error_lists_openai_and_gemini():
     assert "openai" in str(excinfo.value)
 
 
-def test_provider_callers_has_five_registered_providers():
-    assert set(evaluate.PROVIDER_CALLERS) == {"claude", "ollama", "opencode", "opencode_zen",
+def test_provider_callers_has_registered_providers():
+    assert set(evaluate.PROVIDER_CALLERS) == {"claude", "ollama", "lmstudio", "opencode", "opencode_zen",
                                               "opencode_go", "openai", "gemini"}
 
 

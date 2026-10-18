@@ -29,7 +29,7 @@ Everything else is optional and only needs to be set to change a default:
 | `SKILL_EVOLUTION_AUTO_APPLY` / `SKILL_EVOLUTION_MIN_CONFIDENCE` | off / `0.85` | Read by *your* apply step, not by the scripts themselves — see "Auto-Apply" below |
 | `SKILL_EVOLUTION_EVALUATORS` | `deterministic,llm_judge,regression` | Which evaluators the gate runs |
 | `SKILL_EVOLUTION_GATE_STRICTNESS` | `strict` | `strict` (all must pass) or `majority` |
-| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude` / `ollama` / `opencode` / `openai` / `gemini`; comma-separated for a fallback chain (e.g. `claude,opencode,ollama`) |
+| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude` / `ollama` / `lmstudio` / `opencode` / `openai` / `gemini`; comma-separated for a fallback chain (e.g. `claude,opencode,ollama`) |
 | `SKILL_EVOLUTION_CLAUDE_CODE_HOME` | `~/.claude` | Only read when `SKILL_EVOLUTION_HOST=claude_code` |
 | `SKILL_EVOLUTION_HISTORY_PATH` | `./eval_history.jsonl` | Evaluation history file |
 
@@ -197,16 +197,23 @@ full contract.
 
 ### LLM providers
 
-The judge runs against whichever provider you have credentials for — five stdlib-only
+The judge runs against the configured hosted or local provider — stdlib-only
 adapters, no SDK and no LiteLLM:
 
 | `SKILL_EVOLUTION_PROVIDER` | Needs | Default model |
 |---|---|---|
 | `claude` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
 | `ollama` | a local server | `llama3` |
+| `lmstudio` | local OpenAI-compatible API; `SKILL_EVOLUTION_LMSTUDIO_MODEL` required | no implicit model |
 | `opencode` | `OPENCODE_API_KEY` | `big-pickle` |
 | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
 | `gemini` | `GEMINI_API_KEY` | `gemini-2.0-flash` |
+
+For an LM Studio fallback, set `SKILL_EVOLUTION_PROVIDER=opencode,lmstudio`,
+`SKILL_EVOLUTION_LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1` and
+`SKILL_EVOLUTION_LMSTUDIO_MODEL` to an ID exposed by the server (for example
+`phi-3.5-mini-instruct`). The local LM Studio adapter does not require a hosted API key.
+This changes the judge/optimizer provider, not the host agent's analysis model or embeddings.
 
 Each evaluator can override the global choice (`SKILL_EVOLUTION_<EVALUATOR>_PROVIDER`), so
 the judge can run somewhere different from the optimizer's reflection step. Every prompt is

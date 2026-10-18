@@ -597,10 +597,10 @@ def _call_openai_compatible(prompt: str, base_url: str, model: str, headers: Dic
                             provider_label: str, timeout: int = 60) -> str:
     """POST a prompt to any OpenAI-compatible /chat/completions endpoint.
 
-    Shared by the Ollama, OpenCode Zen and OpenAI callers below -- they differ only in
+    Shared by the Ollama, LM Studio, OpenCode Zen and OpenAI callers below -- they differ only in
     env-var names/defaults and auth headers, not in URL construction, request body, or
     response parsing. `provider_label` names the provider in the fail-closed shape-error
-    message so the three callers keep their distinct, test-pinned error text.
+    message so the callers keep their distinct, test-pinned error text.
     """
     payload = _post_json(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -617,6 +617,18 @@ def _call_ollama(prompt: str, timeout: int = 60) -> str:
     base_url = os.environ.get("SKILL_EVOLUTION_OLLAMA_BASE_URL", "http://localhost:11434/v1")
     model = os.environ.get("SKILL_EVOLUTION_OLLAMA_MODEL", "llama3")
     return _call_openai_compatible(prompt, base_url, model, {}, "Ollama/llama.cpp", timeout)
+
+
+def _call_lmstudio(prompt: str, timeout: int = 60) -> str:
+    """Call a configured LM Studio model through its local OpenAI-compatible API."""
+    base_url = os.environ.get("SKILL_EVOLUTION_LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
+    model = os.environ.get("SKILL_EVOLUTION_LMSTUDIO_MODEL", "").strip()
+    if not model:
+        raise ProviderError(
+            "LM Studio provider selected but SKILL_EVOLUTION_LMSTUDIO_MODEL is not set. "
+            "Set it to the model ID exposed by LM Studio before running evaluators."
+        )
+    return _call_openai_compatible(prompt, base_url, model, {}, "LM Studio", timeout)
 
 
 OPENCODE_BASE_URL_ENV_VAR = "SKILL_EVOLUTION_OPENCODE_BASE_URL"
@@ -752,6 +764,7 @@ def _call_gemini(prompt: str, timeout: int = 60) -> str:
 PROVIDER_CALLERS = {
     "claude": _call_claude,
     "ollama": _call_ollama,
+    "lmstudio": _call_lmstudio,
     "opencode": _call_opencode,
     "opencode_zen": _call_opencode_zen,
     "opencode_go": _call_opencode_go,

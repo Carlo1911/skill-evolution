@@ -386,13 +386,15 @@ python3 scripts/skill_quality.py --format json                   # JSON output i
 | `SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD` | `0.85` | Max cosine similarity before flagging as duplicate (higher = stricter) |
 | `SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD` | `0.70` | Min cosine similarity before flagging as drift (lower = stricter) |
 | `SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD` | `0.60` | Min average cosine similarity for grounding check (lower = stricter) |
-| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude`, `ollama`, `opencode`, `openai`, or `gemini`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER`. May be a comma-separated fallback chain (e.g. `claude,opencode,ollama`) — permanent errors (401/403, missing key, unknown provider, malformed response) skip to the next provider; transient errors (timeout, 5xx, 429) retry within each provider before moving on; fails closed only when every provider in the chain is exhausted |
+| `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude`, `ollama`, `lmstudio`, `opencode`, `openai`, or `gemini`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER`. May be a comma-separated fallback chain (e.g. `claude,opencode,ollama`) — permanent errors (401/403, missing key, unknown provider, malformed response) skip to the next provider; transient errors (timeout, 5xx, 429) retry within each provider before moving on; fails closed only when every provider in the chain is exhausted |
 | `SKILL_EVOLUTION_PROVIDER_TIMEOUT` | `60` | HTTP timeout (seconds) for every provider call — one generic knob, since the latency it exists for is a property of the model, not the adapter. Raise it for local reasoning models, which spend much of their output on chain-of-thought before the JSON |
 | `SKILL_EVOLUTION_PROVIDER_RETRIES` | `2` | Retries *after* the first attempt for transient transport failures (HTTP 408/429/5xx, timeouts, connection errors). `0` disables retry and restores strict fail-fast. Auth/4xx and malformed responses are never retried |
 | `SKILL_EVOLUTION_PROVIDER_RETRY_BASE_SECONDS` | `1.0` | Base backoff delay in seconds; each retry waits `base × 2^attempt` (a 429 `Retry-After` header overrides the schedule) |
 | `ANTHROPIC_API_KEY` | — | Required by the `claude` provider |
 | `SKILL_EVOLUTION_CLAUDE_MODEL` | `claude-sonnet-5` | Model used by the Claude provider adapter |
-| `SKILL_EVOLUTION_OLLAMA_BASE_URL` / `_MODEL` | `http://localhost:11434/v1` / `llama3` | Local-model provider adapter config |
+| `SKILL_EVOLUTION_OLLAMA_BASE_URL` / `_MODEL` | `http://localhost:11434/v1` / `llama3` | Ollama provider adapter config |
+| `SKILL_EVOLUTION_LMSTUDIO_BASE_URL` | `http://127.0.0.1:1234/v1` | LM Studio OpenAI-compatible API, including `/v1` |
+| `SKILL_EVOLUTION_LMSTUDIO_MODEL` | — | Required LM Studio model ID, e.g. `phi-3.5-mini-instruct`; use provider `lmstudio` or fallback chain `opencode,lmstudio` |
 | `OPENCODE_API_KEY` | — | Required by the `opencode` provider; fails closed if unset |
 | `SKILL_EVOLUTION_OPENCODE_BASE_URL` | `https://opencode.ai/zen/v1` | Zen carries `big-pickle` and the `*-free` models; the Go tier (`/zen/go/v1`) is a different, smaller catalogue — point this at the tier matching your model id |
 | `SKILL_EVOLUTION_OPENCODE_MODEL` | `big-pickle` | Model id from the chosen catalogue |

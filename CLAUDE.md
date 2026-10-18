@@ -119,6 +119,13 @@ optimize_skill.py (optional, SKILL_EVOLUTION_OPTIMIZER_ENABLED=true)
 
 ### Evaluation framework (`scripts/evaluate.py`)
 
+**Local LM Studio provider:** `lmstudio` is a separate registered adapter using
+`SKILL_EVOLUTION_LMSTUDIO_BASE_URL` (default `http://127.0.0.1:1234/v1`) and the
+required `SKILL_EVOLUTION_LMSTUDIO_MODEL`. It reuses the OpenAI-compatible HTTP,
+redaction, retry and rubric-parsing layer without reading Ollama variables or
+requiring hosted credentials. This machine uses `opencode,lmstudio` with Phi-3.5
+Mini Instruct; the host agent's analyzer model and embedding backend are unchanged.
+
 Introduced to gate auto-apply on measured quality rather than just the proposal's self-reported `confidence`.
 
 - **`EvalResult`** (`score`, `feedback`, `passed`, `evaluator_name`) is the shape every evaluator returns. **`Evaluator`** is the ABC; concrete evaluators register themselves into the module-level `REGISTRY` dict via `register_evaluator()` at import time — there's no dynamic discovery/plugin scanning.
