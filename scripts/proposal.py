@@ -449,7 +449,8 @@ def _build_write_plan(proposal: SkillEvolutionProposal):
 
     Returns (plan, None) on success or (None, error_reason) when the proposal cannot be
     expressed as a mutation at all (currently only a create_new with a missing/
-    placeholder body or name) -- callers refuse before the evaluation gate, so a
+    placeholder body or name, or an improve_existing whose body/description changes are
+    structurally unusable) -- callers refuse before the evaluation gate, so a
     structurally invalid proposal never costs a provider call.
     """
     plan = {
@@ -466,6 +467,13 @@ def _build_write_plan(proposal: SkillEvolutionProposal):
             for c in proposal.proposed_changes
         ],
     }
+    if proposal.type == ProposalType.IMPROVE_EXISTING:
+        # The gate fails these too, but refusing here keeps an unapplicable proposal from
+        # costing a provider call -- and the Hermes adapter would otherwise emit a `patch`
+        # with nothing to patch for an empty new_value.
+        problem = evaluate._structural_problem(proposal)
+        if problem:
+            return None, problem
     if proposal.type == ProposalType.CREATE_NEW:
         meta, error = _resolve_create_meta(proposal)
         if error:

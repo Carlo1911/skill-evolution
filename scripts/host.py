@@ -510,36 +510,20 @@ def _refuse_if_symlinked(skill_dir: Path, skill_md: Path) -> Optional[str]:
     return None
 
 
-def _rewrite_frontmatter_description(content: str, new_value: str) -> Optional[str]:
-    """Replace the single-line `description:` frontmatter value, or None if impossible.
-
-    Single-line values only -- matches skill_index.parse_name_description_frontmatter()'s
-    understanding of the hand-rolled format (no PyYAML). Returns None when the new value
-    contains a newline or the frontmatter has no `description:` line, so the caller fails
-    closed instead of corrupting the file.
-    """
-    if "\n" in new_value:
-        return None
-    lines = content.split("\n")
-    for i, line in enumerate(lines):
-        if line.startswith("description:"):
-            lines[i] = f"description: {new_value}"
-            return "\n".join(lines)
-    return None
-
-
 def _apply_body_change(body: str, change: Dict[str, Any]) -> Optional[str]:
     """Apply one `body` change to an in-memory copy of the skill text, or None to refuse.
 
-    old_value non-empty -> exact substring replace (first occurrence), allowing an empty
-    new_value (a deletion patch). old_value empty -> full replacement, requiring a
-    non-empty new_value. Anything that cannot be applied exactly returns None -- the
-    proposal is refused, never partially applied.
+    old_value non-empty -> exact substring replace, which requires the anchor to occur
+    exactly once: the gate refuses an ambiguous anchor (evaluate._splice_candidate), and
+    replacing "the first of several" here would write a change nobody evaluated.
+    old_value empty -> full replacement, requiring a non-empty new_value. Anything that
+    cannot be applied exactly returns None -- the proposal is refused, never partially
+    applied.
     """
     old_value = change.get("old_value") or ""
     new_value = change.get("new_value") or ""
     if old_value:
-        if old_value not in body:
+        if body.count(old_value) != 1:
             return None
         return body.replace(old_value, new_value, 1)
     if not new_value:
@@ -695,7 +679,7 @@ class ClaudeCodeAdapter(HostAdapter):
                 new_value = change.get("new_value")
                 if not new_value:
                     return _fail_write("description change has an empty new_value")
-                updated = _rewrite_frontmatter_description(content, new_value)
+                updated = skill_index.rewrite_frontmatter_description(content, new_value)
                 if updated is None:
                     return _fail_write(
                         f"description change for '{target}': no single-line description: line in frontmatter"
@@ -706,8 +690,8 @@ class ClaudeCodeAdapter(HostAdapter):
                 updated = _apply_body_change(content, change)
                 if updated is None:
                     return _fail_write(
-                        f"body change for '{target}': old_value not found in installed body "
-                        "(or empty replacement with no old_value)"
+                        f"body change for '{target}': old_value not found exactly once in the "
+                        "installed body (or empty replacement with no old_value)"
                     )
                 content = updated
                 changed_fields.append("body")

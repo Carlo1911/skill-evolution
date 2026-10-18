@@ -40,6 +40,25 @@ def parse_name_description_frontmatter(content: str) -> dict:
     return fields
 
 
+def rewrite_frontmatter_description(content: str, new_value: str) -> Optional[str]:
+    """Replace the single-line `description:` frontmatter value, or None if impossible.
+
+    Single-line values only -- matches parse_name_description_frontmatter()'s
+    understanding of the hand-rolled format (no PyYAML). Returns None when the new value
+    contains a newline or there is no `description:` line, so the caller fails closed
+    instead of corrupting the file. Shared by the Claude Code adapter's write and the
+    gate's composed candidate (evaluate.compose_body_changes), so both mean the same file.
+    """
+    if "\n" in new_value:
+        return None
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("description:"):
+            lines[i] = f"description: {new_value}"
+            return "\n".join(lines)
+    return None
+
+
 def build_skill_record(skill_md: Path, category: str) -> Optional[dict]:
     """Build one skill's index record from its SKILL.md path, or None if it can't be read.
 
