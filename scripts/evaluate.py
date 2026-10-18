@@ -1652,8 +1652,10 @@ def installed_skill_body(skill_name: str) -> Optional[str]:
     return host.get_adapter().read_skill_body(skill_name)
 
 
-def _resolve_baseline(proposal: Any, content_kind: str, claimed: Optional[str]) -> Optional[str]:
-    """Return the text a body change actually replaces, preferring disk over the proposal.
+def _resolve_baseline(proposal: Any, content_kind: str,
+                      claimed: Optional[str]) -> Tuple[Optional[str], bool]:
+    """Return the text a body change actually replaces, preferring disk over the proposal,
+    and whether it came from disk.
 
     `claimed` is the change's `old_value`, which the analyzer LLM writes
     (session-analyzer-prompt.md asks it to emit the current value) and proposal.py persists
@@ -1673,11 +1675,35 @@ def _resolve_baseline(proposal: Any, content_kind: str, claimed: Optional[str]) 
     _extract_evaluated_content() is shared: resolving the baseline twice would let the size
     the gate judged and the size recorded in history drift apart, and
     original_size_for_target() reads that recorded size back as the cumulative reference.
+
+    The second element is True only for a body read from the installed skill. Semantic
+    drift is measured only against such a baseline: a fallback `claimed` is the analyzer's
+    own text, and comparing a proposal with its own claim observes nothing.
     """
     if content_kind != "body":
-        return claimed
+        return claimed, False
     installed = installed_skill_body(getattr(proposal, "target_skill", None) or "")
-    return claimed if installed is None else installed
+    if installed is None:
+        return claimed, False
+    return installed, True
+
+
+def _installed_skills_for_comparison() -> List[Tuple[str, str]]:
+    """(name, body) for every installed skill on the active host, for duplicate checks.
+
+    Read through the host adapter like installed_skill_body(); a skill whose file cannot
+    be read is left out rather than failing the gate.
+    """
+    import host
+
+    skills = []
+    for record in host.get_adapter().iter_skills():
+        try:
+            with open(record["path"], encoding="utf-8") as f:
+                skills.append((record["name"], f.read()))
+        except OSError:
+            continue
+    return skills
 
 
 def _splice_candidate(content: str, claimed_old: Optional[str],
@@ -1755,7 +1781,7 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     # rather than dividing by a zero baseline. _resolve_baseline() prefers the installed
     # skill over the proposal's own claim -- see its docstring for why that matters now
     # that the cap is a ratchet.
-    baseline = _resolve_baseline(proposal, content_kind, claimed_old)
+    baseline, baseline_on_disk = _resolve_baseline(proposal, content_kind, claimed_old)
     if baseline:
         context["baseline_size"] = len(baseline.encode("utf-8"))
 
@@ -1778,6 +1804,17 @@ def evaluate_skill_text(proposal: Any) -> List[EvalResult]:
     original = original_size_for_target(target)
     if original:
         context["original_size"] = original
+
+    # Comparison context for embedding_similarity, which abstains without it: drift
+    # against the installed body (never against the proposal's own old_value), or, for a
+    # new skill, duplicates among the installed ones. Built only when that evaluator is
+    # enabled -- the duplicate set reads every installed skill.
+    if any(e.name == "embedding_similarity" for e in get_enabled_evaluators()):
+        if content_kind == "body" and baseline_on_disk:
+            context["baseline"] = baseline
+        elif (content_kind == "body"
+              and getattr(getattr(proposal, "type", None), "value", None) == "create_new"):
+            context["existing_skills"] = _installed_skills_for_comparison()
 
     return run_evaluators(content, target, context=context)
 
@@ -2128,7 +2165,7 @@ def evaluate_and_record(proposal: Any, session_ids: Optional[List[str]] = None,
         if content_kind == MALFORMED_CONTENT_KIND:
             _record_target("skill", target, skill_results, kind="skill_text")
         else:
-            baseline = _resolve_baseline(proposal, content_kind, claimed_old)
+            baseline, _ = _resolve_baseline(proposal, content_kind, claimed_old)
             # Mirror evaluate_skill_text()'s splice so the recorded size is
             # the size that was actually judged. On splice refusal (or when
             # there is nothing to splice) record without sizes -- persisting

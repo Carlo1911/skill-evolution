@@ -6,8 +6,8 @@ This evaluator uses embeddings to detect:
 - Poor grounding (similarity < threshold between proposal and source sessions)
 
 Configuration:
-    SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD: Max similarity before flagging as duplicate (default: 0.85)
-    SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD: Min similarity before flagging as drift (default: 0.70)
+    SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD: Max similarity before flagging as duplicate (default: 0.90)
+    SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD: Min similarity before flagging as drift (default: 0.90)
     SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD: Min similarity for grounding (default: 0.60)
 
 Usage:
@@ -110,8 +110,12 @@ class EmbeddingSimilarityEvaluator(Evaluator):
         """
         self._backend: Optional[EmbeddingBackend] = None
 
-        self.duplicate_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD", 0.85)
-        self.drift_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD", 0.70)
+        # Defaults calibrated on 176 installed skills with the default model: at 0.90,
+        # 11% of skills have a neighbour above the duplicate line (0.85 flagged 31%), and
+        # the weighted drift similarity of real applied changes is 0.98-1.00 while
+        # wholesale rewrites score 0.64-0.73.
+        self.duplicate_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD", 0.90)
+        self.drift_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD", 0.90)
         self.grounding_threshold = env_float("SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD", 0.60)
 
     @property
@@ -200,8 +204,12 @@ class EmbeddingSimilarityEvaluator(Evaluator):
         """Check if content has drifted too far from baseline (drift detection).
 
         Both texts are split into windows that fit the model (see DRIFT_WINDOW_CHARS).
-        Each content window is matched to its most similar baseline window, and the
-        drift similarity is the lowest of those matches -- the window that changed most.
+        Each content window is matched to its most similar baseline window, and the drift
+        similarity is the mean of those matches weighted by window length -- how much of
+        the new text still corresponds to the old. Not the minimum: measured on installed
+        skills, the single worst window scored an added section (0.64-0.75) no better than
+        a wholesale rewrite (0.54-0.66), while the weighted mean kept real, applied changes
+        and added sections at 0.98-1.00 and rewrites at 0.64-0.73.
 
         Args:
             content: New content to check
@@ -213,13 +221,14 @@ class EmbeddingSimilarityEvaluator(Evaluator):
         if content == baseline:
             return self._not_applicable("content is identical to the baseline; nothing changed")
         try:
-            content_embeddings = self.backend.embed(_windows(content))
+            content_windows = _windows(content)
+            content_embeddings = self.backend.embed(content_windows)
             baseline_embeddings = self.backend.embed(_windows(baseline))
 
-            similarity = min(
-                max(cosine_similarity(c, b) for b in baseline_embeddings)
-                for c in content_embeddings
-            )
+            matches = [max(cosine_similarity(c, b) for b in baseline_embeddings)
+                       for c in content_embeddings]
+            weights = [len(w) for w in content_windows]
+            similarity = sum(m * w for m, w in zip(matches, weights)) / sum(weights)
             
             if similarity < self.drift_threshold:
                 return EvalResult(

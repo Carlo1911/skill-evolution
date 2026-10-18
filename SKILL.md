@@ -383,8 +383,8 @@ python3 scripts/skill_quality.py --format json                   # JSON output i
 | `SKILL_EVOLUTION_LLM_JUDGE_THRESHOLD` | `0.7` | Minimum average rubric score to pass |
 | `SKILL_EVOLUTION_EMBEDDING_BACKEND` | `fastembed` | Embedding backend to use. Options: `fastembed` (implemented), `ollama`, `openai`, `llama_cpp` (stubbed). Requires the corresponding backend to be available |
 | `SKILL_EVOLUTION_FASTEMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Model name for the `fastembed` backend. Models are cached in `~/.cache/fastembed/` |
-| `SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD` | `0.85` | Max cosine similarity before flagging as duplicate (higher = stricter) |
-| `SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD` | `0.70` | Min cosine similarity before flagging as drift (lower = stricter) |
+| `SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD` | `0.90` | Max cosine similarity before flagging as duplicate (higher = stricter) |
+| `SKILL_EVOLUTION_EMBEDDING_DRIFT_THRESHOLD` | `0.90` | Min length-weighted similarity between new and installed body windows before flagging as drift (higher = stricter) |
 | `SKILL_EVOLUTION_EMBEDDING_GROUNDING_THRESHOLD` | `0.60` | Min average cosine similarity for grounding check (lower = stricter) |
 | `SKILL_EVOLUTION_PROVIDER` | `claude` | `claude`, `ollama`, `lmstudio`, `opencode`, `openai`, or `gemini`; per-evaluator override via `SKILL_EVOLUTION_<EVALUATOR>_PROVIDER`. May be a comma-separated fallback chain (e.g. `claude,opencode,ollama`) — permanent errors (401/403, missing key, unknown provider, malformed response) skip to the next provider; transient errors (timeout, 5xx, 429) retry within each provider before moving on; fails closed only when every provider in the chain is exhausted |
 | `SKILL_EVOLUTION_PROVIDER_TIMEOUT` | `60` | HTTP timeout (seconds) for every provider call — one generic knob, since the latency it exists for is a property of the model, not the adapter. Raise it for local reasoning models, which spend much of their output on chain-of-thought before the JSON |

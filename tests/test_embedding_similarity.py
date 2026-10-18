@@ -333,9 +333,10 @@ class TestWindowedDrift:
         backend.embed.side_effect = lambda texts: [vectors(t) for t in texts]
         return backend
 
-    def test_only_the_changed_section_lowers_the_similarity(self):
+    def test_a_change_past_the_model_window_is_seen(self):
         # The change sits past the first 2 KB; the fake backend, like the real model,
-        # only "sees" the start of each text it embeds.
+        # only "sees" the start of each text it embeds. Whole-body embeddings of these
+        # two texts would be identical.
         intro = "# Skill\n\n" + "Intro sentence. " * 80 + "\n"
         steps = "## Steps\n\n" + "Do the thing. " * 80 + "\n"
         old_tail = "## Pitfalls\n\nWatch out for X.\n"
@@ -350,8 +351,23 @@ class TestWindowedDrift:
                    return_value=self._backend_by_text(vectors)):
             result = EmbeddingSimilarityEvaluator().evaluate(content, {"baseline": baseline})
 
+        assert result.score < 1.0
+        assert result.passed is True  # a small section changed; the skill did not drift
+
+    def test_replacing_most_of_the_body_by_length_is_drift(self):
+        keep = "# Skill\n\nShort intro.\n"
+        old_rest = "## Body\n\n" + "Original guidance. " * 60 + "\n"
+        new_rest = "## Body\n\n" + "Unrelated replacement. " * 60 + "\n"
+
+        def vectors(text):
+            return [0.0, 1.0] if "Unrelated" in text else [1.0, 0.0]
+
+        with patch('embedding_similarity.get_embedding_backend',
+                   return_value=self._backend_by_text(vectors)):
+            result = EmbeddingSimilarityEvaluator().evaluate(keep + new_rest, {"baseline": keep + old_rest})
+
         assert result.passed is False
-        assert result.score == pytest.approx(0.0)
+        assert result.score < 0.1
 
     def test_long_section_is_split_and_no_window_exceeds_the_limit(self):
         import embedding_similarity
@@ -397,5 +413,5 @@ class TestFailClosed:
 
         ev = EmbeddingSimilarityEvaluator()
 
-        assert ev.duplicate_threshold == 0.85
+        assert ev.duplicate_threshold == 0.90
         assert "SKILL_EVOLUTION_EMBEDDING_DUPLICATE_THRESHOLD" in capsys.readouterr().err
