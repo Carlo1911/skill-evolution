@@ -147,13 +147,24 @@ def save_proposal(proposal: SkillEvolutionProposal, directory: Optional[str] = N
     return path
 
 
+def _frontmatter_problem(content: str) -> str:
+    """Name why `content` has no frontmatter block load_proposal() can parse.
+
+    The bare "Invalid proposal file" this replaces sent the reviewer into the file to find
+    out; the live case was an analyzer-written proposal missing only its opening `---`.
+    """
+    if not content.startswith("---\n"):
+        return "missing opening '---' frontmatter delimiter on line 1"
+    return "frontmatter opened on line 1 but no closing '---' line follows"
+
+
 def load_proposal(path: str) -> SkillEvolutionProposal:
     with open(path) as f:
         content = f.read()
     m = re.match(r"^---\n(.*?)\n---\n(.*)", content, re.DOTALL)
     if not m:
-        raise ValueError(f"Invalid proposal file: {path}")
-    
+        raise ValueError(f"Invalid proposal file: {path}: {_frontmatter_problem(content)}")
+
     data = _parse_frontmatter(m.group(1))
     proposal = SkillEvolutionProposal(
         proposal_id=data.get("proposal_id", str(uuid4())),
@@ -587,10 +598,13 @@ def main():
     elif args.show:
         proposals_dir = get_proposals_dir()
         path = os.path.join(proposals_dir, f"{args.show}.md")
-        if os.path.exists(path):
-            print(load_proposal(path).render())
-        else:
+        if not os.path.exists(path):
             print(f"Proposal '{args.show}' not found in {proposals_dir}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            print(load_proposal(path).render())
+        except (ValueError, IOError) as e:
+            print(f"Proposal '{args.show}' is unreadable: {e}", file=sys.stderr)
             sys.exit(1)
 
 
