@@ -7,8 +7,8 @@ Usage:
     python3 scripts/proposal_diagnostics.py --format json   # one object per proposal
     python3 scripts/proposal_diagnostics.py --dir PATH      # another proposals directory
 
-Each proposal gets one primary state, by precedence -- unreadable, incomplete, ambiguous,
-archived, unresolved, stale, else valid -- plus every reason that applies, so a reviewer
+Each proposal gets one primary state, by precedence -- unreadable, duplicate_id, incomplete,
+ambiguous, archived, unresolved, stale, else valid -- plus every reason that applies, so a reviewer
 sees that an incomplete proposal also targets an archived skill and that completing it
 would not make it applicable. Possible duplicates are flagged on top of the state, by
 deterministic text rules only.
@@ -34,7 +34,8 @@ import proposal as proposal_module
 import skill_index
 from proposal import ProposalStatus, ProposalType
 
-STATE_PRECEDENCE = ["unreadable", "incomplete", "ambiguous", "archived", "unresolved", "stale"]
+STATE_PRECEDENCE = ["unreadable", "duplicate_id", "incomplete", "ambiguous", "archived", "unresolved",
+                    "stale"]
 
 # Change fields each proposal type can turn into a skill mutation (see the host adapters'
 # apply_skill_write()); anything else -- e.g. a repo script path -- cannot be applied.
@@ -171,6 +172,29 @@ def _duplicate_flags(pending, reference, view: _SkillView) -> Dict[str, List[Dic
     return flags
 
 
+def _id_conflicts(loaded, unreadable_files) -> Dict[str, Dict[str, str]]:
+    """A `duplicate_id` reason per file whose proposal id another file also claims.
+
+    The same claim rule as proposal.find_proposal_file(): every readable file declaring
+    the id, plus `<id>.md` when it cannot be read -- the live case is an unreadable
+    20260823-001.md beside a readable 20260823-001-new.md declaring that id. Nothing that
+    keys on the id (--show, the duplicate rules below) can tell such files apart.
+    """
+    claims: Dict[str, set] = defaultdict(set)
+    for fname, p in loaded:
+        claims[p.proposal_id].add(fname)
+    conflicts = {}
+    for pid, fnames in claims.items():
+        if f"{pid}.md" in unreadable_files:
+            fnames.add(f"{pid}.md")
+        if len(fnames) > 1:
+            reason = {"code": "duplicate_id",
+                      "detail": f"proposal id '{pid}' is claimed by several files: {', '.join(sorted(fnames))}"}
+            for fname in fnames:
+                conflicts[fname] = reason
+    return conflicts
+
+
 def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -> List[Dict[str, Any]]:
     """Classify the proposals in `directory` (default: proposal.get_proposals_dir()).
 
@@ -198,6 +222,11 @@ def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -
                             "reasons": [{"code": "unreadable", "detail": str(e)}],
                             "possible_duplicates": []})
 
+    conflicts = _id_conflicts(loaded, {r["file"] for r in results})
+    for r in results:
+        if r["file"] in conflicts:
+            r["reasons"].append(conflicts[r["file"]])
+
     def classified(p):
         return include_all or p.status == ProposalStatus.PROPOSED
 
@@ -208,7 +237,7 @@ def diagnose_queue(directory: Optional[str] = None, include_all: bool = False) -
     for fname, p in loaded:
         if not classified(p):
             continue
-        reasons = _diagnose_one(p, view)
+        reasons = ([conflicts[fname]] if fname in conflicts else []) + _diagnose_one(p, view)
         codes = [r["code"] for r in reasons]
         state = next((s for s in STATE_PRECEDENCE if s in codes), "valid")
         results.append({"file": fname, "proposal_id": p.proposal_id, "type": p.type.value,

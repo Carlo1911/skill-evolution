@@ -67,6 +67,9 @@ class SkillEvolutionProposal:
     session_ids: List[str] = field(default_factory=list)
     status: ProposalStatus = ProposalStatus.PROPOSED
     applied_at: Optional[str] = None
+    # The file this proposal was loaded from, so save_proposal() writes it back there and
+    # not to <proposal_id>.md -- which can be a *different* file. Never rendered.
+    source_path: Optional[str] = field(default=None, repr=False, compare=False)
 
     def render(self) -> str:
         return f"{self._render_frontmatter()}\n{self._render_body()}"
@@ -138,12 +141,24 @@ class SkillEvolutionProposal:
 # ── I/O ─────────────────────────────────────────────────────────────
 
 def save_proposal(proposal: SkillEvolutionProposal, directory: Optional[str] = None) -> str:
+    """Write `proposal` to its source file when it was loaded from `directory`, else to
+    `<directory>/<proposal_id>.md`.
+
+    Always writing <proposal_id>.md was wrong once two files shared an id (live case:
+    20260823-001.md and 20260823-001-new.md): applying the `-new` file wrote
+    `status: applied` over the other one and left `-new` still `proposed`, i.e.
+    applicable a second time.
+    """
     proposals_dir = directory or get_proposals_dir()
     os.makedirs(proposals_dir, exist_ok=True)
     path = os.path.join(proposals_dir, f"{proposal.proposal_id}.md")
+    source = proposal.source_path
+    if source and os.path.realpath(os.path.dirname(source)) == os.path.realpath(proposals_dir):
+        path = source
     content = evaluate.redact_secrets(proposal.render())  # redact secrets before persisting to disk
     with open(path, "w") as f:
         f.write(content)
+    proposal.source_path = path
     return path
 
 
@@ -175,6 +190,7 @@ def load_proposal(path: str) -> SkillEvolutionProposal:
         summary=data.get("summary", ""),
         status=ProposalStatus(data.get("status", "proposed")),
         applied_at=data.get("applied_at"),
+        source_path=path,
     )
     raw_sessions = data.get("session_ids", [])
     if isinstance(raw_sessions, list):
@@ -218,6 +234,37 @@ def list_proposals(directory: Optional[str] = None) -> List[SkillEvolutionPropos
         except (ValueError, IOError) as e:
             print(f"warning: skipping unreadable proposal {fname}: {e}", file=sys.stderr)
     return proposals
+
+
+def find_proposal_file(proposal_id: str, directory: Optional[str] = None) -> str:
+    """Return the one file in `directory` that holds `proposal_id`.
+
+    Candidates are every readable file declaring that id plus `<proposal_id>.md` when it
+    cannot be read -- so a `-new` copy is found by its id, and an unreadable namesake
+    still counts as a claim rather than leaving the copy to look unique. Raises
+    FileNotFoundError when nothing matches and ValueError naming every file when several
+    do: picking one would show the reviewer a proposal other than the one they meant.
+    """
+    proposals_dir = directory or get_proposals_dir()
+    canonical = f"{proposal_id}.md"
+    candidates = set()
+    if os.path.isdir(proposals_dir):
+        for fname in os.listdir(proposals_dir):
+            if not fname.endswith(".md"):
+                continue
+            path = os.path.join(proposals_dir, fname)
+            try:
+                if load_proposal(path).proposal_id == proposal_id:
+                    candidates.add(path)
+            except (ValueError, IOError):
+                if fname == canonical:
+                    candidates.add(path)
+    if not candidates:
+        raise FileNotFoundError(f"no proposal with id '{proposal_id}' in {proposals_dir}")
+    if len(candidates) > 1:
+        names = ", ".join(sorted(os.path.basename(c) for c in candidates))
+        raise ValueError(f"several files claim proposal id '{proposal_id}': {names}")
+    return candidates.pop()
 
 
 def _encode_frontmatter_value(value: str) -> str:
@@ -597,9 +644,13 @@ def main():
     
     elif args.show:
         proposals_dir = get_proposals_dir()
-        path = os.path.join(proposals_dir, f"{args.show}.md")
-        if not os.path.exists(path):
+        try:
+            path = find_proposal_file(args.show, proposals_dir)
+        except FileNotFoundError:
             print(f"Proposal '{args.show}' not found in {proposals_dir}", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as e:
+            print(f"Proposal '{args.show}' is ambiguous: {e}", file=sys.stderr)
             sys.exit(1)
         try:
             print(load_proposal(path).render())

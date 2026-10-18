@@ -314,3 +314,52 @@ def test_proposals_sharing_several_changes_are_flagged_once(queue):
     flags = _by_id(queue)["a"]["possible_duplicates"]
 
     assert [f["other"] for f in flags] == ["b"]
+
+
+def _copy_as(directory, pid, fname):
+    """Save proposal `pid` again under another file name, keeping its id."""
+    (directory / fname).write_text((directory / f"{pid}.md").read_text())
+
+
+def test_two_readable_files_sharing_an_id_are_duplicate_id(queue):
+    _save(queue, "dup")
+    _copy_as(queue, "dup", "dup-new.md")
+
+    diags = {d["file"]: d for d in proposal_diagnostics.diagnose_queue(str(queue))}
+
+    for fname in ("dup.md", "dup-new.md"):
+        assert diags[fname]["state"] == "duplicate_id"
+        assert "dup-new.md, dup.md" in diags[fname]["reasons"][0]["detail"]
+
+
+def test_an_unreadable_namesake_makes_its_copy_duplicate_id(queue):
+    """The live case: 20260823-001.md unreadable beside 20260823-001-new.md."""
+    _save(queue, "dup")
+    _copy_as(queue, "dup", "dup-new.md")
+    (queue / "dup.md").write_text("no frontmatter here")
+
+    diags = {d["file"]: d for d in proposal_diagnostics.diagnose_queue(str(queue))}
+
+    assert diags["dup-new.md"]["state"] == "duplicate_id"
+    assert diags["dup.md"]["state"] == "unreadable"
+    assert _reasons(diags["dup.md"]) == ["unreadable", "duplicate_id"]
+
+
+def test_duplicate_id_outranks_and_keeps_the_other_reasons(queue):
+    _save(queue, "dup", target="retired")
+    _copy_as(queue, "dup", "dup-new.md")
+
+    diag = {d["file"]: d for d in proposal_diagnostics.diagnose_queue(str(queue))}["dup-new.md"]
+
+    assert diag["state"] == "duplicate_id"
+    assert _reasons(diag) == ["duplicate_id", "archived"]
+
+
+def test_a_file_named_other_than_its_id_alone_is_not_duplicate_id(queue):
+    _save(queue, "solo")
+    (queue / "solo.md").rename(queue / "solo-new.md")
+    _save(queue, "other")  # an unrelated file, readable, under its own name
+
+    diags = {d["file"]: d for d in proposal_diagnostics.diagnose_queue(str(queue))}
+
+    assert diags["solo-new.md"]["state"] == "valid"
